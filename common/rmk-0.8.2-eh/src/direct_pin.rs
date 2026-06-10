@@ -126,8 +126,6 @@ impl<
 {
     #[cfg(feature = "async_matrix")]
     async fn wait_for_key(&mut self) {
-        use core::pin::pin;
-
         if let Some(start_time) = self.scan_start {
             // If no key press over 1ms, stop scanning and wait for interupt
             if start_time.elapsed().as_millis() <= 1 {
@@ -146,7 +144,8 @@ impl<
                     let _ = futs.push(direct_pin.wait_for_low());
                 }
             }
-            let _ = select_slice(pin!(futs.as_mut_slice())).await;
+            let futs = unsafe { core::pin::Pin::new_unchecked(futs.as_mut_slice()) };
+            let _ = select_slice(futs).await;
         } else {
             let mut futs: Vec<_, SIZE> = Vec::new();
             for direct_pins_row in self.direct_pins.iter_mut() {
@@ -154,7 +153,8 @@ impl<
                     let _ = futs.push(direct_pin.wait_for_high());
                 }
             }
-            let _ = select_slice(pin!(futs.as_mut_slice())).await;
+            let futs = unsafe { core::pin::Pin::new_unchecked(futs.as_mut_slice()) };
+            let _ = select_slice(futs).await;
         }
         self.scan_start = Some(Instant::now());
     }

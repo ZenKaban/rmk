@@ -1,5 +1,3 @@
-#[cfg(feature = "async_matrix")]
-use core::pin::pin;
 use core::sync::atomic::Ordering;
 
 use embassy_time::Timer;
@@ -286,7 +284,8 @@ impl<
             .iter_mut()
             .map(|input_pin| input_pin.wait_for_high())
             .collect();
-        let _ = select_slice(pin!(futs.as_mut_slice())).await;
+        let futs = unsafe { core::pin::Pin::new_unchecked(futs.as_mut_slice()) };
+        let _ = select_slice(futs).await;
     }
 }
 
@@ -314,7 +313,8 @@ impl<
             .iter_mut()
             .map(|input_pin| input_pin.wait_for_high())
             .collect();
-        let _ = select_slice(pin!(futs.as_mut_slice())).await;
+        let futs = unsafe { core::pin::Pin::new_unchecked(futs.as_mut_slice()) };
+        let _ = select_slice(futs).await;
     }
 }
 
