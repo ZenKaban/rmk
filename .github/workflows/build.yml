@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        keyboard: [k03, imperial44, op36, velvet, velvet_ui]
+        keyboard: [k03, k04, imperial44, op36, velvet, velvet_ui]
 
     steps:
       - name: Checkout
