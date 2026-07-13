@@ -336,6 +336,7 @@ where
     lcd: LazyQubeLcd<I>,
     renderer: QubeStatusRenderer,
     ctx: RenderContext,
+    last_host_data: rmk::host_data::HostData,
     last_render: Instant,
     pending: bool,
     min_interval: Duration,
@@ -365,6 +366,7 @@ where
     };
     static BL: StaticCell<Output<'static>> = StaticCell::new();
     let _ = BL.init(Output::new(bl, level, OutputDrive::Standard));
+    let host_data = rmk::host_data::snapshot();
 
     DongleScreen {
         lcd: LazyQubeLcd {
@@ -378,8 +380,9 @@ where
             }),
             irq,
         },
-        renderer: QubeStatusRenderer,
+        renderer: QubeStatusRenderer { host_data },
         ctx: RenderContext::default(),
+        last_host_data: host_data,
         last_render: Instant::from_ticks(0),
         pending: true,
         min_interval: Duration::from_millis(80),
@@ -395,6 +398,7 @@ where
         + 'static,
 {
     async fn redraw(&mut self) {
+        self.sync_host_data();
         let now = Instant::now();
         if now.duration_since(self.last_render) < self.min_interval {
             self.pending = true;
@@ -408,6 +412,15 @@ where
 
     fn request_redraw(&mut self) {
         self.pending = true;
+    }
+
+    fn sync_host_data(&mut self) {
+        let host_data = rmk::host_data::snapshot();
+        if host_data != self.last_host_data {
+            self.last_host_data = host_data;
+            self.renderer.host_data = host_data;
+            self.request_redraw();
+        }
     }
 }
 
@@ -431,6 +444,7 @@ where
 {
     async fn run(&mut self) -> ! {
         self.pending = true;
+        self.sync_host_data();
         self.redraw().await;
 
         let mut layer_sub = LayerChangeEvent::subscriber();
@@ -454,7 +468,7 @@ where
                     .unwrap_or(Duration::MIN);
                 match select(
                     Timer::after(wait),
-                    Self::next_any(
+                    Self::next_any_or_host_tick(
                         &mut layer_sub,
                         &mut wpm_sub,
                         &mut led_sub,
@@ -476,7 +490,7 @@ where
                     }
                 }
             } else {
-                let ev = Self::next_any(
+                let ev = Self::next_any_or_host_tick(
                     &mut layer_sub,
                     &mut wpm_sub,
                     &mut led_sub,
@@ -539,6 +553,7 @@ enum UiEv {
     PeriConn(PeripheralConnectedEvent),
     PeriBat(PeripheralBatteryEvent),
     Central(CentralConnectedEvent),
+    HostDataTick,
 }
 
 impl<I> DongleScreen<I>
@@ -549,6 +564,32 @@ where
         > + Copy
         + 'static,
 {
+    async fn next_any_or_host_tick(
+        layer: &mut impl EventSubscriber<Event = LayerChangeEvent>,
+        wpm: &mut impl EventSubscriber<Event = WpmUpdateEvent>,
+        led: &mut impl EventSubscriber<Event = LedIndicatorEvent>,
+        mods: &mut impl EventSubscriber<Event = ModifierEvent>,
+        key: &mut impl EventSubscriber<Event = KeyboardEvent>,
+        sleep: &mut impl EventSubscriber<Event = SleepStateEvent>,
+        bat: &mut impl EventSubscriber<Event = BatteryStatusEvent>,
+        conn: &mut impl EventSubscriber<Event = ConnectionStatusChangeEvent>,
+        peri_conn: &mut impl EventSubscriber<Event = PeripheralConnectedEvent>,
+        peri_bat: &mut impl EventSubscriber<Event = PeripheralBatteryEvent>,
+        central: &mut impl EventSubscriber<Event = CentralConnectedEvent>,
+    ) -> UiEv {
+        match select(
+            Timer::after(Duration::from_secs(1)),
+            Self::next_any(
+                layer, wpm, led, mods, key, sleep, bat, conn, peri_conn, peri_bat, central,
+            ),
+        )
+        .await
+        {
+            Either::First(_) => UiEv::HostDataTick,
+            Either::Second(ev) => ev,
+        }
+    }
+
     async fn next_any(
         layer: &mut impl EventSubscriber<Event = LayerChangeEvent>,
         wpm: &mut impl EventSubscriber<Event = WpmUpdateEvent>,
@@ -624,6 +665,10 @@ where
                 }
             }
             UiEv::Central(e) => self.ctx.central_connected = e.connected,
+            UiEv::HostDataTick => {
+                self.sync_host_data();
+                need_redraw = false;
+            }
         }
         if need_redraw {
             self.request_redraw();
@@ -659,7 +704,9 @@ where
 //   146..164 modifier state
 //   176..222 battery cards
 
-pub struct QubeStatusRenderer;
+pub struct QubeStatusRenderer {
+    host_data: rmk::host_data::HostData,
+}
 
 impl DisplayRenderer<Rgb565> for QubeStatusRenderer {
     fn render<D: DrawTarget<Color = Rgb565>>(&mut self, ctx: &RenderContext, display: &mut D) {
@@ -675,6 +722,10 @@ impl DisplayRenderer<Rgb565> for QubeStatusRenderer {
             .alignment(Alignment::Center)
             .baseline(Baseline::Top)
             .build();
+        let tr = TextStyleBuilder::new()
+            .alignment(Alignment::Right)
+            .baseline(Baseline::Top)
+            .build();
         let mc = TextStyleBuilder::new()
             .alignment(Alignment::Center)
             .baseline(Baseline::Middle)
@@ -688,13 +739,14 @@ impl DisplayRenderer<Rgb565> for QubeStatusRenderer {
         // Header.
         draw_panel(display, SAFE_X, 14, SAFE_W, 28, COL_PANEL, COL_BORDER_DIM);
         draw_round_fill(display, SAFE_X + 11, 23, 3, 10, 2, COL_ACCENT);
-        let _ = Text::with_text_style("QUBE", Point::new(SAFE_X + 22, 21), body_accent, top)
-            .draw(display);
-
         let mut s: heapless::String<16> = heapless::String::new();
-        let _ = write!(&mut s, "{} WPM", ctx.wpm);
+        let _ = s.push_str(host_layout_label(self.host_data.layout));
         let _ =
-            Text::with_text_style(&s, Point::new(SCREEN_W as i32 / 2, 21), body, tc).draw(display);
+            Text::with_text_style(&s, Point::new(SAFE_X + 22, 21), body_accent, top).draw(display);
+        s.clear();
+        push_host_time(&mut s, self.host_data.hour, self.host_data.minute);
+        let _ = Text::with_text_style(&s, Point::new(SAFE_X + SAFE_W as i32 - 14, 21), body, tr)
+            .draw(display);
 
         // Layer panel.
         draw_panel(
@@ -932,5 +984,25 @@ fn layer_name(layer: u8) -> &'static str {
         4 => "SYM",
         5 => "NUM",
         _ => "?",
+    }
+}
+
+fn host_layout_label(layout: Option<u8>) -> &'static str {
+    match layout {
+        Some(0) => "EN",
+        Some(1) => "RU",
+        Some(_) => "??",
+        None => "--",
+    }
+}
+
+fn push_host_time(buffer: &mut heapless::String<16>, hour: Option<u8>, minute: Option<u8>) {
+    match (hour, minute) {
+        (Some(hour), Some(minute)) => {
+            let _ = write!(buffer, "{:02}:{:02}", hour, minute);
+        }
+        _ => {
+            let _ = buffer.push_str("--:--");
+        }
     }
 }

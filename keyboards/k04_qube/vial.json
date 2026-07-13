@@ -2,6 +2,9 @@
     "name": "Ergohaven K:04",
     "vendorId": "0xE126",
     "productId": "0x0071",
+    "entropy": {
+        "liveFeatures": ["time", "layout"]
+    },
     "lighting": "none",
     "matrix": {
         "rows": 10,

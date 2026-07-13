@@ -16,6 +16,27 @@ mod vial;
 #[cfg(feature = "vial_lock")]
 mod vial_lock;
 
+const HOST_DATA_TIME: u8 = 0xAA;
+const HOST_DATA_VOLUME: u8 = 0xAB;
+const HOST_DATA_LAYOUT: u8 = 0xAC;
+const HOST_DATA_MEDIA_ARTIST: u8 = 0xAD;
+const HOST_DATA_MEDIA_TITLE: u8 = 0xAE;
+
+fn process_host_data_packet(data: &[u8; 32]) -> bool {
+    match data[0] {
+        HOST_DATA_TIME => {
+            crate::host_data::update_time(data[1], data[2]);
+            true
+        }
+        HOST_DATA_LAYOUT => {
+            crate::host_data::update_layout(data[1]);
+            true
+        }
+        HOST_DATA_VOLUME | HOST_DATA_MEDIA_ARTIST | HOST_DATA_MEDIA_TITLE => true,
+        _ => false,
+    }
+}
+
 pub struct VialService<'a> {
     ctx: &'a KeyboardContext<'a>,
     vial_config: VialConfig<'static>,
@@ -236,6 +257,9 @@ impl Runnable for VialService<'_> {
     async fn run(&mut self) -> ! {
         loop {
             let (transport, output_data) = HOST_REQUEST_CHANNEL.receive().await;
+            if process_host_data_packet(&output_data) {
+                continue;
+            }
             let mut report = ViaReport {
                 input_data: output_data,
                 output_data,

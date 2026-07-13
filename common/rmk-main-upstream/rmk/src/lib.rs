@@ -74,6 +74,7 @@ pub mod helper_macro;
 pub mod hid;
 #[cfg(feature = "host")]
 pub mod host;
+pub mod host_data;
 pub mod input_device;
 pub mod keyboard;
 pub mod keyboard_macros;

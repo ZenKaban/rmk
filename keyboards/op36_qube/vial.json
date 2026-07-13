@@ -2,6 +2,9 @@
     "name": "Ergohaven OP36",
     "vendorId": "0xE126",
     "productId": "0x0036",
+    "entropy": {
+        "liveFeatures": ["time", "layout"]
+    },
     "lighting": "none",
     "matrix": {
         "rows": 6,
