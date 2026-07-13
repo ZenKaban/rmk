@@ -1,0 +1,194 @@
+[keyboard]
+name = "Ergohaven OP36"
+product_name = "OP36"
+vendor_id = 0xE126
+product_id = 0x0036
+manufacturer = "Ergohaven"
+chip = "nrf52840"
+
+[host]
+vial_enabled = true
+# Physical keys: top row inner positions on left half — (0,4)=Q, (0,3)=W in OP36 matrix
+unlock_keys = [[0, 4], [0, 3]]
+
+[rmk]
+split_peripherals_num = 2
+combo_max_num = 32
+morse_max_num = 32
+macro_space_size = 2048
+ble_profiles_num = 5
+
+# https://rmk.rs/main/docs/configuration/wireless
+# Battery: src/battery_nrf.rs (P0_31, ZMK 1564/2370). No battery_adc_pin here —
+# stock RMK SAADC calibrate() can hang under SoftDevice.
+# Cargo.toml enables rmk "display" so SplitMessage layout matches dongle.
+[ble]
+enabled = true
+
+[storage]
+clear_storage = false
+
+[event]
+peripheral_battery.pubs = 2
+peripheral_battery.subs = 4
+# Dongle UI + 2 peripheral sync consumers; avoid dropped layer/mod updates
+# during multipass ST7789 present.
+layer_change.channel_size = 4
+layer_change.subs = 6
+modifier.channel_size = 8
+modifier.subs = 6
+
+[split]
+connection = "ble"
+
+[split.central]
+rows = 0
+cols = 0
+row_offset = 0
+col_offset = 0
+
+[split.central.matrix]
+matrix_type = "direct_pin"
+direct_pins = []
+
+[[split.peripheral]]
+rows = 3
+cols = 6
+row_offset = 0
+col_offset = 0
+
+[split.peripheral.matrix]
+matrix_type = "normal"
+row_pins = ["P1_09", "P0_05", "P0_09"]
+col_pins = ["P0_13", "P0_24", "P0_10", "P0_03", "P1_10", "P1_11"]
+
+[[split.peripheral]]
+rows = 3
+cols = 6
+row_offset = 3
+col_offset = 0
+
+[split.peripheral.matrix]
+matrix_type = "normal"
+row_pins = ["P1_09", "P0_05", "P1_10"]
+col_pins = ["P0_30", "P0_29", "P0_02", "P1_13", "P0_28", "P0_03"]
+
+[behavior.tri_layer]
+upper = 3
+lower = 4
+adjust = 5
+
+[behavior.one_shot]
+timeout = "300s"
+
+[behavior.one_shot_modifiers]
+activate_on_keypress = true
+
+[layout]
+# Unified matrix: left rows 0-2, right rows 3-5; each half 3x6
+# Left: cols 0-4 main (reversed wiring), col5 = thumbs
+# Right: cols 0-4 main, col5 = thumbs
+rows = 6
+cols = 6
+layers = 6
+matrix_map = """
+(0,4,L) (0,3,L) (0,2,L) (0,1,L) (0,0,L)    (3,0,R) (3,1,R) (3,2,R) (3,3,R) (3,4,R)
+(1,4,L) (1,3,L) (1,2,L) (1,1,L) (1,0,L)    (4,0,R) (4,1,R) (4,2,R) (4,3,R) (4,4,R)
+(2,4,L) (2,3,L) (2,2,L) (2,1,L) (2,0,L)    (5,0,R) (5,1,R) (5,2,R) (5,3,R) (5,4,R)
+                (0,5,L) (1,5,L) (2,5,L)    (5,5,R) (4,5,R) (3,5,R)
+"""
+
+[aliases]
+# Universal Layout mapping
+SQuot     = "Grave"
+DQuot     = "WM(Grave, LShift)"
+Grave     = "WM(Grave, RAlt)"
+Pipe      = "WM(Backslash, LShift)"
+Backslash = "WM(Backslash, RAlt)"
+Nbsp      = "WM(Space, RAlt)"
+Comma     = "LeftBracket"
+Semicolon = "WM(LeftBracket, LShift)"
+Dot       = "RightBracket"
+Colon     = "WM(RightBracket, LShift)"
+Minus     = "Minus"
+Under     = "WM(Minus, LShift)"
+Equal     = "Equal"
+Plus      = "WM(Equal, LShift)"
+Slash     = "Backslash"
+LBracket  = "Dot"
+LBrace    = "WM(Dot, LShift)"
+RBracket  = "Slash"
+RBrace    = "WM(Slash, LShift)"
+Ampersand = "Comma"
+Tilde     = "Semicolon"
+# One-shot Modifiers mapping
+OSM_G     = "OSM(LGui)"
+OSM_A     = "OSM(LAlt)"
+OSM_C     = "OSM(LCtrl)"
+OSM_S     = "OSM(LShift)"
+# Window Management mapping
+PrevSpace = "WM(Left,  LCtrl | LGui)"
+NextSpace = "WM(Right, LCtrl | LGui)"
+# Bluetooth profiles mapping
+BT_1      = "User0"
+BT_2      = "User1"
+BT_3      = "User2"
+BT_Next   = "User3"
+BT_Prev   = "User4"
+BT_Clear  = "User5"
+BT_Toggle = "User6" # Toggle between USB and BLE
+
+
+[[layer]] # 0
+name = "base_layer"
+keys = """
+Q          W          E          R          T          Y          U          I          O          P
+A          S          D          F          G          H          J          K          L          @Tilde
+Z          X          C          V          B          N          M          @Ampersand @LBracket  @RBracket
+                      CapsLock   Space      MO(3)      MO(4)      LShift     RAlt
+"""
+
+[[layer]] # 1
+name = "gam_layer"
+keys = """
+Tab        Q          W          E          R          No         No         Up         No         Tab
+LShift     A          S          D          F          No         Left       Down       Right      RShift
+LCtrl      Z          X          C          V          No         No         No         No         RCtrl
+                      LAlt       Space      MO(2)      TG(1)      Space      No
+"""
+
+[[layer]] # 2
+name = "gfn_layer"
+keys = """
+Kc5        Kc1        Kc2        Kc3        Kc4        @BT_Toggle @BT_1      @BT_2      @BT_3      @BT_Clear
+Kc0        Kc6        Kc7        Kc8        Kc9        No         No         No         No         No
+G          J          I          M          T          NumLock    No         No         No         No
+                      Escape     Enter      ___        ___        ___        No
+"""
+
+[[layer]] # 3
+name = "nav_layer"
+keys = """
+__         __         __         __         Escape     Escape     Home       End        Backspace  Delete
+@OSM_G     @OSM_A     @OSM_C     @OSM_S     Enter      Enter      Left       Down       Up         Right
+@PrevSpace @NextSpace TG(1)      pscr       Tab        Tab        PageUp     PageDown   Quote      NumLock
+                      ___        ___        ___        ___        ___        ___
+"""
+
+[[layer]] # 4
+name = "sym_layer"
+keys = """
+Kc1        Kc2        Kc3        Kc4        Kc5        Kc6        Kc7        Kc8        Kc9        Kc0
+@Tilde     @Grave     @SQuot     @DQuot     @Minus     @Plus      @OSM_S     @OSM_C     @OSM_A     @OSM_G
+@Backslash No         @Semicolon @Comma     @Under     @Equal     @Dot       @Colon     @Pipe      @Slash
+                      ___        ___        ___        ___        ___        ___
+"""
+
+[[layer]] # 5
+name = "num_layer"
+keys = """
+Kp1        Kp2        Kp3        Kp4        Kp5        Kp6        Kp7        Kp8        Kp9        Kp0
+@OSM_G     @OSM_A     @OSM_C     @OSM_S     F11        F12        @OSM_S     @OSM_C     @OSM_A     @OSM_G
+F1         F2         F3         F4         F5         F6         F7         F8         F9         F10
+                      ___        ___        ___        ___        ___        ___
+"""

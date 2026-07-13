@@ -13,6 +13,7 @@ RMK BLE split firmware for Ergohaven keyboards and trackballs (nRF52840).
 | K:04 Micro  | 3×5 + 3 thumb  | 1+1      | —         |
 | Imperial44  | 4×6 + 3 thumb  | 1+1      | —         |
 | OP36        | 3×5 + 3 thumb  | —        | —         |
+| OP36 Qube   | 3×5 + 3 thumb  | —        | Qube dongle + ST7789 |
 | Velvet      | 4×6 + 5 thumb  | —        | —         |
 | Velvet UI   | 4×6 + 5 thumb  | —        | PMW3610   |
 
@@ -55,3 +56,8 @@ Every push builds all devices in parallel via GitHub Actions. UF2 artifacts avai
 ## RMK Version
 
 Based on [RMK](https://github.com/HaoboGu/rmk) 0.8.2 with nRF52840 BLE support.
+
+`keyboards/op36_qube` is isolated on `common/rmk-main-upstream`, vendored from
+official RMK upstream `https://github.com/HaoboGu/rmk` main at commit
+`baaab8b7d839e8938e016892965891f1bde45efe`, so current 0.8.2 firmwares are
+not mixed with the Qube runtime.
