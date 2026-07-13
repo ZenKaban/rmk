@@ -20,12 +20,12 @@ use embassy_nrf::peripherals::{P0_02, P0_03, P0_28, P1_10, P1_11, P1_13, SPI3};
 use embassy_nrf::spim::{self, Spim};
 use embassy_nrf::{interrupt, Peri};
 use embassy_time::{Delay, Duration, Instant, Timer};
-use embedded_graphics::mono_font::ascii::{FONT_6X10, FONT_9X15, FONT_9X18_BOLD};
+use embedded_graphics::mono_font::ascii::{FONT_6X10, FONT_9X15};
 use embedded_graphics::mono_font::MonoTextStyle;
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::{
-    PrimitiveStyle, PrimitiveStyleBuilder, Rectangle, RoundedRectangle,
+    Line, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle, RoundedRectangle,
 };
 use embedded_graphics::text::{Alignment, Baseline, Text, TextStyleBuilder};
 use embedded_hal_bus::spi::{ExclusiveDevice, NoDelay};
@@ -65,6 +65,10 @@ const SAFE_W: u32 = SCREEN_W as u32 - (SAFE_X as u32 * 2);
 const PANEL_RADIUS: u32 = 12;
 const CHIP_RADIUS: u32 = 8;
 const BAR_RADIUS: u32 = 5;
+const LAYER_TITLE_W: i32 = 12;
+const LAYER_TITLE_H: i32 = 24;
+const LAYER_TITLE_GAP: i32 = 1;
+const LAYER_TITLE_STROKE: u32 = 2;
 
 const COL_BG: Rgb565 = Rgb565::new(1, 3, 5);
 const COL_FG: Rgb565 = Rgb565::new(30, 61, 30);
@@ -668,7 +672,6 @@ impl DisplayRenderer<Rgb565> for QubeStatusRenderer {
         let small = MonoTextStyle::new(&FONT_6X10, COL_MUTED);
         let small_dim = MonoTextStyle::new(&FONT_6X10, COL_DIM);
         let body = MonoTextStyle::new(&FONT_9X15, COL_FG);
-        let layer_title = MonoTextStyle::new(&FONT_9X18_BOLD, COL_FG);
         let body_muted = MonoTextStyle::new(&FONT_9X15, COL_MUTED);
         let body_accent = MonoTextStyle::new(&FONT_9X15, COL_ACCENT);
         let body_amber = MonoTextStyle::new(&FONT_9X15, COL_AMBER);
@@ -734,8 +737,7 @@ impl DisplayRenderer<Rgb565> for QubeStatusRenderer {
         let _ = write!(&mut s, "LAYER {}", ctx.layer);
         let _ =
             Text::with_text_style(&s, Point::new(SCREEN_W as i32 / 2, 69), small, tc).draw(display);
-        let _ = Text::with_text_style(name, Point::new(SCREEN_W as i32 / 2, 92), layer_title, tc)
-            .draw(display);
+        draw_vector_text_centered(display, name, SCREEN_W as i32 / 2, 101, COL_FG);
 
         // Modifier chips.
         draw_panel(display, SAFE_X, 138, SAFE_W, 27, COL_PANEL, COL_BORDER);
@@ -844,6 +846,271 @@ fn draw_chip<D: DrawTarget<Color = Rgb565>>(
         .build();
     let _ =
         Text::with_text_style(label, Point::new(x + w as i32 / 2, y + 3), text, tc).draw(display);
+}
+
+fn draw_vector_text_centered<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    text: &str,
+    center_x: i32,
+    center_y: i32,
+    color: Rgb565,
+) {
+    let chars = text.chars().count() as i32;
+    if chars == 0 {
+        return;
+    }
+    let total_w = chars * LAYER_TITLE_W + (chars - 1) * LAYER_TITLE_GAP;
+    let mut x = center_x - total_w / 2;
+    let y = center_y - LAYER_TITLE_H / 2;
+    for ch in text.chars() {
+        draw_vector_glyph(display, ch, x, y, color);
+        x += LAYER_TITLE_W + LAYER_TITLE_GAP;
+    }
+}
+
+fn draw_vector_glyph<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    ch: char,
+    x: i32,
+    y: i32,
+    color: Rgb565,
+) {
+    match ch {
+        'A' => {
+            seg(display, x, y, 1, 14, 3, 0, color);
+            seg(display, x, y, 9, 14, 7, 0, color);
+            seg(display, x, y, 3, 0, 7, 0, color);
+            seg(display, x, y, 2, 7, 8, 7, color);
+        }
+        'B' => {
+            seg(display, x, y, 1, 0, 1, 14, color);
+            seg(display, x, y, 1, 0, 7, 0, color);
+            seg(display, x, y, 7, 0, 10, 3, color);
+            seg(display, x, y, 10, 3, 10, 5, color);
+            seg(display, x, y, 10, 5, 8, 7, color);
+            seg(display, x, y, 1, 7, 8, 7, color);
+            seg(display, x, y, 8, 7, 10, 9, color);
+            seg(display, x, y, 10, 9, 10, 12, color);
+            seg(display, x, y, 10, 12, 7, 14, color);
+            seg(display, x, y, 1, 14, 7, 14, color);
+        }
+        'D' => {
+            seg(display, x, y, 1, 0, 1, 14, color);
+            seg(display, x, y, 1, 0, 7, 0, color);
+            seg(display, x, y, 7, 0, 10, 3, color);
+            seg(display, x, y, 10, 3, 10, 11, color);
+            seg(display, x, y, 10, 11, 7, 14, color);
+            seg(display, x, y, 1, 14, 7, 14, color);
+        }
+        'E' => {
+            seg(display, x, y, 1, 0, 1, 14, color);
+            seg(display, x, y, 1, 0, 10, 0, color);
+            seg(display, x, y, 1, 7, 8, 7, color);
+            seg(display, x, y, 1, 14, 10, 14, color);
+        }
+        'F' => {
+            seg(display, x, y, 1, 0, 1, 14, color);
+            seg(display, x, y, 1, 0, 10, 0, color);
+            seg(display, x, y, 1, 7, 8, 7, color);
+        }
+        'G' => {
+            seg(display, x, y, 10, 1, 3, 1, color);
+            seg(display, x, y, 3, 1, 1, 4, color);
+            seg(display, x, y, 1, 4, 1, 11, color);
+            seg(display, x, y, 1, 11, 3, 14, color);
+            seg(display, x, y, 3, 14, 10, 14, color);
+            seg(display, x, y, 10, 14, 10, 8, color);
+            seg(display, x, y, 10, 8, 6, 8, color);
+        }
+        'J' => {
+            seg(display, x, y, 2, 0, 10, 0, color);
+            seg(display, x, y, 8, 0, 8, 11, color);
+            seg(display, x, y, 8, 11, 6, 14, color);
+            seg(display, x, y, 6, 14, 2, 14, color);
+            seg(display, x, y, 2, 14, 1, 11, color);
+        }
+        'L' => {
+            seg(display, x, y, 1, 0, 1, 14, color);
+            seg(display, x, y, 1, 14, 10, 14, color);
+        }
+        'M' => {
+            seg(display, x, y, 1, 14, 1, 0, color);
+            seg(display, x, y, 1, 0, 5, 7, color);
+            seg(display, x, y, 5, 7, 9, 0, color);
+            seg(display, x, y, 9, 0, 9, 14, color);
+        }
+        'N' => {
+            seg(display, x, y, 1, 14, 1, 0, color);
+            seg(display, x, y, 1, 0, 10, 14, color);
+            seg(display, x, y, 10, 14, 10, 0, color);
+        }
+        'P' => {
+            seg(display, x, y, 1, 14, 1, 0, color);
+            seg(display, x, y, 1, 0, 8, 0, color);
+            seg(display, x, y, 8, 0, 10, 3, color);
+            seg(display, x, y, 10, 3, 10, 6, color);
+            seg(display, x, y, 10, 6, 8, 8, color);
+            seg(display, x, y, 1, 8, 8, 8, color);
+        }
+        'R' => {
+            seg(display, x, y, 1, 14, 1, 0, color);
+            seg(display, x, y, 1, 0, 8, 0, color);
+            seg(display, x, y, 8, 0, 10, 3, color);
+            seg(display, x, y, 10, 3, 10, 6, color);
+            seg(display, x, y, 10, 6, 8, 8, color);
+            seg(display, x, y, 1, 8, 8, 8, color);
+            seg(display, x, y, 6, 8, 10, 14, color);
+        }
+        'S' => {
+            seg(display, x, y, 10, 1, 3, 1, color);
+            seg(display, x, y, 3, 1, 1, 4, color);
+            seg(display, x, y, 1, 4, 3, 7, color);
+            seg(display, x, y, 3, 7, 8, 7, color);
+            seg(display, x, y, 8, 7, 10, 10, color);
+            seg(display, x, y, 10, 10, 8, 13, color);
+            seg(display, x, y, 8, 13, 1, 13, color);
+        }
+        'T' => {
+            seg(display, x, y, 1, 0, 10, 0, color);
+            seg(display, x, y, 5, 0, 5, 14, color);
+        }
+        'U' => {
+            seg(display, x, y, 1, 0, 1, 11, color);
+            seg(display, x, y, 1, 11, 4, 14, color);
+            seg(display, x, y, 4, 14, 8, 14, color);
+            seg(display, x, y, 8, 14, 10, 11, color);
+            seg(display, x, y, 10, 11, 10, 0, color);
+        }
+        'V' => {
+            seg(display, x, y, 1, 0, 5, 14, color);
+            seg(display, x, y, 5, 14, 10, 0, color);
+        }
+        'Y' => {
+            seg(display, x, y, 1, 0, 5, 7, color);
+            seg(display, x, y, 10, 0, 5, 7, color);
+            seg(display, x, y, 5, 7, 5, 14, color);
+        }
+        '0' => {
+            seg(display, x, y, 3, 0, 8, 0, color);
+            seg(display, x, y, 8, 0, 10, 3, color);
+            seg(display, x, y, 10, 3, 10, 11, color);
+            seg(display, x, y, 10, 11, 8, 14, color);
+            seg(display, x, y, 8, 14, 3, 14, color);
+            seg(display, x, y, 3, 14, 1, 11, color);
+            seg(display, x, y, 1, 11, 1, 3, color);
+            seg(display, x, y, 1, 3, 3, 0, color);
+        }
+        '1' => {
+            seg(display, x, y, 5, 0, 5, 14, color);
+            seg(display, x, y, 3, 3, 5, 0, color);
+            seg(display, x, y, 2, 14, 8, 14, color);
+        }
+        '2' => {
+            seg(display, x, y, 2, 1, 8, 1, color);
+            seg(display, x, y, 8, 1, 10, 4, color);
+            seg(display, x, y, 10, 4, 1, 14, color);
+            seg(display, x, y, 1, 14, 10, 14, color);
+        }
+        '3' => {
+            seg(display, x, y, 2, 1, 8, 1, color);
+            seg(display, x, y, 8, 1, 10, 4, color);
+            seg(display, x, y, 6, 7, 10, 7, color);
+            seg(display, x, y, 10, 7, 10, 11, color);
+            seg(display, x, y, 10, 11, 8, 14, color);
+            seg(display, x, y, 8, 14, 2, 14, color);
+        }
+        '4' => {
+            seg(display, x, y, 9, 0, 9, 14, color);
+            seg(display, x, y, 1, 0, 1, 7, color);
+            seg(display, x, y, 1, 7, 10, 7, color);
+        }
+        '5' => {
+            seg(display, x, y, 10, 1, 2, 1, color);
+            seg(display, x, y, 2, 1, 2, 7, color);
+            seg(display, x, y, 2, 7, 8, 7, color);
+            seg(display, x, y, 8, 7, 10, 10, color);
+            seg(display, x, y, 10, 10, 8, 14, color);
+            seg(display, x, y, 8, 14, 1, 14, color);
+        }
+        '6' => {
+            seg(display, x, y, 9, 1, 3, 1, color);
+            seg(display, x, y, 3, 1, 1, 5, color);
+            seg(display, x, y, 1, 5, 1, 11, color);
+            seg(display, x, y, 1, 11, 3, 14, color);
+            seg(display, x, y, 3, 14, 8, 14, color);
+            seg(display, x, y, 8, 14, 10, 11, color);
+            seg(display, x, y, 10, 11, 8, 8, color);
+            seg(display, x, y, 8, 8, 1, 8, color);
+        }
+        '7' => {
+            seg(display, x, y, 1, 1, 10, 1, color);
+            seg(display, x, y, 10, 1, 4, 14, color);
+        }
+        '8' => {
+            seg(display, x, y, 3, 0, 8, 0, color);
+            seg(display, x, y, 8, 0, 10, 3, color);
+            seg(display, x, y, 10, 3, 8, 7, color);
+            seg(display, x, y, 8, 7, 10, 11, color);
+            seg(display, x, y, 10, 11, 8, 14, color);
+            seg(display, x, y, 8, 14, 3, 14, color);
+            seg(display, x, y, 3, 14, 1, 11, color);
+            seg(display, x, y, 1, 11, 3, 7, color);
+            seg(display, x, y, 3, 7, 1, 3, color);
+            seg(display, x, y, 1, 3, 3, 0, color);
+            seg(display, x, y, 3, 7, 8, 7, color);
+        }
+        '9' => {
+            seg(display, x, y, 8, 14, 10, 10, color);
+            seg(display, x, y, 10, 10, 10, 3, color);
+            seg(display, x, y, 10, 3, 8, 0, color);
+            seg(display, x, y, 8, 0, 3, 0, color);
+            seg(display, x, y, 3, 0, 1, 3, color);
+            seg(display, x, y, 1, 3, 3, 7, color);
+            seg(display, x, y, 3, 7, 10, 7, color);
+        }
+        '?' => {
+            seg(display, x, y, 2, 2, 5, 0, color);
+            seg(display, x, y, 5, 0, 9, 2, color);
+            seg(display, x, y, 9, 2, 9, 5, color);
+            seg(display, x, y, 9, 5, 5, 8, color);
+            dot(display, x, y, 5, 13, color);
+        }
+        _ => {}
+    }
+}
+
+fn seg<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    x: i32,
+    y: i32,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    color: Rgb565,
+) {
+    let p0 = Point::new(x + x0 * LAYER_TITLE_W / 10, y + y0 * LAYER_TITLE_H / 14);
+    let p1 = Point::new(x + x1 * LAYER_TITLE_W / 10, y + y1 * LAYER_TITLE_H / 14);
+    let _ = Line::new(p0, p1)
+        .into_styled(PrimitiveStyle::with_stroke(color, LAYER_TITLE_STROKE))
+        .draw(display);
+}
+
+fn dot<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    x: i32,
+    y: i32,
+    cx: i32,
+    cy: i32,
+    color: Rgb565,
+) {
+    let p = Point::new(
+        x + cx * LAYER_TITLE_W / 10 - 1,
+        y + cy * LAYER_TITLE_H / 14 - 1,
+    );
+    let _ = Rectangle::new(Point::new(p.x, p.y), Size::new(3, 3))
+        .into_styled(PrimitiveStyle::with_fill(color))
+        .draw(display);
 }
 
 #[derive(Clone, Copy)]
