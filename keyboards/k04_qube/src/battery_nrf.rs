@@ -45,26 +45,45 @@ pub struct K04Battery {
 impl K04Battery {
     pub fn new(saadc: Peri<'static, SAADC>, pin: Peri<'static, P0_31>) -> Self {
         interrupt::SAADC.set_priority(interrupt::Priority::P3);
-        let channel = saadc::ChannelConfig::single_ended(pin.degrade_saadc());
+        let mut channel = saadc::ChannelConfig::single_ended(pin.degrade_saadc());
+        // K:04 uses a high-impedance battery divider. The default 10 us
+        // acquisition can leave the SAADC sample capacitor biased high on
+        // some halves, which shows up as a sticky 100%.
+        channel.time = saadc::Time::_40US;
         Self {
             saadc: Saadc::new(saadc, SaadcIrqs, saadc::Config::default(), [channel]),
         }
     }
 
+    async fn sample_raw(&mut self) -> Option<u16> {
+        let mut sum = 0u32;
+        let mut count = 0u32;
+
+        for index in 0..5 {
+            let mut buf = [0i16; 1];
+            if with_timeout(Duration::from_millis(200), self.saadc.sample(&mut buf))
+                .await
+                .is_ok()
+                && index > 0
+            {
+                sum += buf[0].max(0) as u32;
+                count += 1;
+            }
+            Timer::after(Duration::from_millis(2)).await;
+        }
+
+        (count > 0).then_some((sum / count) as u16)
+    }
+
     async fn publish_sample(&mut self) {
-        let mut buf = [0i16; 1];
-        let level =
-            match with_timeout(Duration::from_millis(200), self.saadc.sample(&mut buf)).await {
-                Ok(()) => {
-                    let raw = if buf[0] < 0 { 0 } else { buf[0] as u16 };
-                    percent(raw)
-                }
-                Err(_) => 0,
-            };
-        publish_event(BatteryStatusEvent(BatteryStatus::Available {
-            charge_state: ChargeState::Unknown,
-            level: Some(level),
-        }));
+        let status = match self.sample_raw().await {
+            Some(raw) => BatteryStatus::Available {
+                charge_state: ChargeState::Unknown,
+                level: Some(percent(raw)),
+            },
+            None => BatteryStatus::Unavailable,
+        };
+        publish_event(BatteryStatusEvent(status));
     }
 }
 
