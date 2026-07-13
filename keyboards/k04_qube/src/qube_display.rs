@@ -59,15 +59,20 @@ const STRIPE_BYTES: usize = SCREEN_W * STRIPE_H * 2;
 
 const BACKLIGHT_ACTIVE_HIGH: bool = true;
 
-const COL_BG: Rgb565 = Rgb565::BLACK;
-const COL_FG: Rgb565 = Rgb565::WHITE;
-const COL_DIM: Rgb565 = Rgb565::new(14, 28, 14);
-const COL_GREEN: Rgb565 = Rgb565::new(5, 50, 5);
+const COL_BG: Rgb565 = Rgb565::new(1, 3, 5);
+const COL_FG: Rgb565 = Rgb565::new(30, 61, 30);
+const COL_MUTED: Rgb565 = Rgb565::new(13, 28, 18);
+const COL_DIM: Rgb565 = Rgb565::new(7, 16, 14);
+const COL_ACCENT: Rgb565 = Rgb565::new(4, 45, 31);
+const COL_ACCENT_DIM: Rgb565 = Rgb565::new(2, 24, 22);
+const COL_AMBER: Rgb565 = Rgb565::new(31, 43, 5);
 const COL_YELLOW: Rgb565 = Rgb565::new(31, 50, 0);
 const COL_RED: Rgb565 = Rgb565::new(31, 5, 5);
-const COL_BAR_BG: Rgb565 = Rgb565::new(6, 12, 6);
-const COL_BAR_FG: Rgb565 = Rgb565::new(28, 56, 28);
-const COL_PANEL: Rgb565 = Rgb565::new(4, 8, 4);
+const COL_BAR_BG: Rgb565 = Rgb565::new(3, 9, 10);
+const COL_BAR_FG: Rgb565 = Rgb565::new(4, 47, 30);
+const COL_PANEL: Rgb565 = Rgb565::new(3, 8, 10);
+const COL_PANEL_HI: Rgb565 = Rgb565::new(5, 13, 16);
+const COL_BORDER: Rgb565 = Rgb565::new(7, 17, 18);
 
 type SpiDev = ExclusiveDevice<Spim<'static>, Output<'static>, NoDelay>;
 type Di = SpiInterface<SpiDev, Output<'static>>;
@@ -641,12 +646,12 @@ where
 
 // --- Full-screen UI ---------------------------------------------------------
 //
-// Fixed vertical zones (280×240) so nothing overlaps:
-//   0..56   chrome (WPM | USB/BLE) — side columns only
-//  60..108  layer (centered, large)
-// 112..148  modifiers (centered)
-// 148..200  batteries L / R
-// 208..240  footer (version · RMK)
+// Fixed vertical zones (280x240) so nothing overlaps:
+//   8..36    compact header
+//   43..125  layer panel
+//   132..159 modifier chips
+//   168..220 battery cards
+//   224..240 footer
 
 pub struct QubeStatusRenderer;
 
@@ -654,127 +659,178 @@ impl DisplayRenderer<Rgb565> for QubeStatusRenderer {
     fn render<D: DrawTarget<Color = Rgb565>>(&mut self, ctx: &RenderContext, display: &mut D) {
         let _ = display.clear(COL_BG);
 
-        let white = MonoTextStyle::new(&FONT_9X15, COL_FG);
-        let dim_mid = MonoTextStyle::new(&FONT_9X15, COL_DIM);
-        let green = MonoTextStyle::new(&FONT_9X15, COL_GREEN);
-        let wpm_num = MonoTextStyle::new(&FONT_10X20, COL_FG);
+        let small = MonoTextStyle::new(&FONT_6X10, COL_MUTED);
+        let small_dim = MonoTextStyle::new(&FONT_6X10, COL_DIM);
+        let body = MonoTextStyle::new(&FONT_9X15, COL_FG);
+        let body_muted = MonoTextStyle::new(&FONT_9X15, COL_MUTED);
+        let body_accent = MonoTextStyle::new(&FONT_9X15, COL_ACCENT);
+        let body_amber = MonoTextStyle::new(&FONT_9X15, COL_AMBER);
+        let top = TextStyleBuilder::new().baseline(Baseline::Top).build();
+        let tc = TextStyleBuilder::new()
+            .alignment(Alignment::Center)
+            .baseline(Baseline::Top)
+            .build();
+        let tr = TextStyleBuilder::new()
+            .alignment(Alignment::Right)
+            .baseline(Baseline::Top)
+            .build();
 
         let left = ctx.peripherals_connected.first().copied().unwrap_or(false);
         let right = ctx.peripherals_connected.get(1).copied().unwrap_or(false);
         let lp = battery_reading(ctx.peripheral_batteries.first().map(|b| b.0));
         let rp = battery_reading(ctx.peripheral_batteries.get(1).map(|b| b.0));
-
-        // --- Zone 0..56: side chrome (a bit lower + larger type) ---
-        let _ = Rectangle::new(Point::new(0, 0), Size::new(SCREEN_W as u32, 56))
-            .into_styled(PrimitiveStyle::with_fill(COL_PANEL))
-            .draw(display);
-
-        // WPM — left column; counter uses largest mono font
-        let mut s: heapless::String<16> = heapless::String::new();
-        let _ = write!(&mut s, "{}", ctx.wpm);
-        let _ = Text::new(&s, Point::new(22, 20), wpm_num).draw(display);
-        let _ = Text::new("WPM", Point::new(22, 44), white).draw(display);
-
-        // USB / BLE — right column (FONT_9X15)
+        let name = layer_name(ctx.layer);
         let ble_on = matches!(
             ctx.ble_status.state,
             BleState::Connected | BleState::Advertising
         );
         let ble_ok = ctx.ble_status.state == BleState::Connected;
-        // Same inset as WPM from the left (x=22).
-        let right_x = SCREEN_W as i32 - 22;
-        let tr = TextStyleBuilder::new()
-            .alignment(Alignment::Right)
-            .baseline(Baseline::Top)
-            .build();
+
+        // Header.
+        draw_panel(display, 8, 8, 264, 28, COL_PANEL, COL_BORDER);
+        let _ = Rectangle::new(Point::new(8, 8), Size::new(4, 28))
+            .into_styled(PrimitiveStyle::with_fill(COL_ACCENT))
+            .draw(display);
+        let _ = Text::with_text_style("QUBE", Point::new(18, 15), body_accent, top).draw(display);
+
+        let mut s: heapless::String<16> = heapless::String::new();
+        let _ = write!(&mut s, "{}", ctx.wpm);
+        let _ = Text::with_text_style("WPM", Point::new(91, 13), small_dim, top).draw(display);
+        let _ = Text::with_text_style(&s, Point::new(128, 13), body, top).draw(display);
+
         let _ = Text::with_text_style(
             "USB",
-            Point::new(right_x, 12),
-            if ble_on { dim_mid } else { white },
-            tr,
+            Point::new(183, 15),
+            if ble_on { body_muted } else { body_accent },
+            top,
         )
         .draw(display);
-        let mut ble_l: heapless::String<12> = heapless::String::new();
-        let _ = write!(
-            &mut ble_l,
-            "{}BLE{}",
-            if ble_on { ">" } else { "" },
-            ctx.ble_status.profile.saturating_add(1)
-        );
+        s.clear();
+        let _ = write!(&mut s, "BLE{}", ctx.ble_status.profile.saturating_add(1));
         let _ = Text::with_text_style(
-            &ble_l,
-            Point::new(right_x, 34),
+            &s,
+            Point::new(260, 15),
             if ble_ok {
-                green
+                body_accent
             } else if ble_on {
-                white
+                body_amber
             } else {
-                dim_mid
+                body_muted
             },
             tr,
         )
         .draw(display);
 
-        // --- Zone 60..100: layer (2× FONT_10X20 → 40 px tall) ---
-        let name = layer_name(ctx.layer);
+        // Layer panel.
+        draw_panel(display, 8, 43, 264, 82, COL_PANEL_HI, COL_BORDER);
+        let _ = Rectangle::new(Point::new(8, 43), Size::new(264, 3))
+            .into_styled(PrimitiveStyle::with_fill(COL_ACCENT))
+            .draw(display);
+        s.clear();
+        let _ = write!(&mut s, "LAYER {}", ctx.layer);
+        let _ =
+            Text::with_text_style(&s, Point::new(SCREEN_W as i32 / 2, 53), small, tc).draw(display);
         draw_text_scaled_centered(
             display,
             name,
             SCREEN_W as i32 / 2,
-            60,
+            76,
             &FONT_10X20,
             COL_FG,
             2,
         );
 
-        // --- Zone 104..140: modifiers (2× FONT_9X15 → 30 px; shorter alphabet) ---
-        if ctx.modifiers.into_bits() != 0 || ctx.caps_lock {
-            s.clear();
-            if ctx.caps_lock {
-                let _ = s.push_str("CAPS ");
-            }
-            if ctx.modifiers.left_ctrl() || ctx.modifiers.right_ctrl() {
-                let _ = s.push_str("C ");
-            }
-            if ctx.modifiers.left_shift() || ctx.modifiers.right_shift() {
-                let _ = s.push_str("S ");
-            }
-            if ctx.modifiers.left_alt() || ctx.modifiers.right_alt() {
-                let _ = s.push_str("A ");
-            }
-            if ctx.modifiers.left_gui() || ctx.modifiers.right_gui() {
-                let _ = s.push_str("G");
-            }
-            // "CAPS C S A G" at 9×15×2 ≈ 198 px — still < 280
-            draw_text_scaled_centered(
-                display,
-                s.trim_end(),
-                SCREEN_W as i32 / 2,
-                108,
-                &FONT_9X15,
-                COL_FG,
-                2,
-            );
-        }
+        // Modifier chips.
+        draw_panel(display, 8, 132, 264, 27, COL_PANEL, COL_BORDER);
+        draw_chip(display, 16, 138, 44, "CAPS", ctx.caps_lock);
+        draw_chip(
+            display,
+            66,
+            138,
+            44,
+            "CTRL",
+            ctx.modifiers.left_ctrl() || ctx.modifiers.right_ctrl(),
+        );
+        draw_chip(
+            display,
+            116,
+            138,
+            48,
+            "SHIFT",
+            ctx.modifiers.left_shift() || ctx.modifiers.right_shift(),
+        );
+        draw_chip(
+            display,
+            170,
+            138,
+            42,
+            "ALT",
+            ctx.modifiers.left_alt() || ctx.modifiers.right_alt(),
+        );
+        draw_chip(
+            display,
+            218,
+            138,
+            42,
+            "GUI",
+            ctx.modifiers.left_gui() || ctx.modifiers.right_gui(),
+        );
 
-        // --- Zone 148..200: batteries (two columns, no scale-2 on long labels) ---
-        let _ = Text::new("BATTERY", Point::new(12, 150), dim_mid).draw(display);
-        draw_bat(display, 16, 172, 118, lp, left, "L");
-        draw_bat(display, 150, 172, 118, rp, right, "R");
+        // Battery cards.
+        draw_bat(display, 8, 168, 128, lp, left, "LEFT");
+        draw_bat(display, 144, 168, 128, rp, right, "RIGHT");
 
-        // --- Zone 208..240: footer ---
-        let _ = Rectangle::new(Point::new(20, 210), Size::new((SCREEN_W - 40) as u32, 1))
+        // Footer.
+        let _ = Rectangle::new(Point::new(16, 224), Size::new((SCREEN_W - 32) as u32, 1))
             .into_styled(PrimitiveStyle::with_fill(COL_DIM))
             .draw(display);
         let mut ver: heapless::String<24> = heapless::String::new();
-        let _ = write!(&mut ver, "v{} · RMK", env!("CARGO_PKG_VERSION"));
-        let tc = TextStyleBuilder::new()
-            .alignment(Alignment::Center)
-            .baseline(Baseline::Top)
-            .build();
-        let _ = Text::with_text_style(&ver, Point::new(SCREEN_W as i32 / 2, 218), dim_mid, tc)
+        let _ = write!(&mut ver, "v{} / RMK", env!("CARGO_PKG_VERSION"));
+        let _ = Text::with_text_style(&ver, Point::new(SCREEN_W as i32 / 2, 229), small, tc)
             .draw(display);
     }
+}
+
+fn draw_panel<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    fill: Rgb565,
+    stroke: Rgb565,
+) {
+    let rect = Rectangle::new(Point::new(x, y), Size::new(w, h));
+    let _ = rect
+        .into_styled(PrimitiveStyle::with_fill(fill))
+        .draw(display);
+    let _ = rect
+        .into_styled(PrimitiveStyle::with_stroke(stroke, 1))
+        .draw(display);
+}
+
+fn draw_chip<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    x: i32,
+    y: i32,
+    w: u32,
+    label: &str,
+    active: bool,
+) {
+    let fill = if active { COL_ACCENT_DIM } else { COL_BG };
+    let stroke = if active { COL_ACCENT } else { COL_BORDER };
+    let text = if active {
+        MonoTextStyle::new(&FONT_6X10, COL_FG)
+    } else {
+        MonoTextStyle::new(&FONT_6X10, COL_DIM)
+    };
+    draw_panel(display, x, y, w, 16, fill, stroke);
+    let tc = TextStyleBuilder::new()
+        .alignment(Alignment::Center)
+        .baseline(Baseline::Top)
+        .build();
+    let _ =
+        Text::with_text_style(label, Point::new(x + w as i32 / 2, y + 3), text, tc).draw(display);
 }
 
 fn draw_text_scaled_centered<D: DrawTarget<Color = Rgb565>>(
@@ -860,9 +916,6 @@ fn draw_bat<D: DrawTarget<Color = Rgb565>>(
     connected: bool,
     side: &str,
 ) {
-    let dim = MonoTextStyle::new(&FONT_6X10, COL_DIM);
-    let _ = Text::new(side, Point::new(x, y), dim).draw(display);
-
     let (label, col, fill_pct): (heapless::String<8>, Rgb565, Option<u8>) =
         match (connected, reading) {
             (false, _) => {
@@ -889,19 +942,35 @@ fn draw_bat<D: DrawTarget<Color = Rgb565>>(
             }
         };
 
-    let style = MonoTextStyle::new(&FONT_9X15, col);
-    let _ = Text::new(&label, Point::new(x + 14, y), style).draw(display);
+    draw_panel(display, x, y, w as u32, 52, COL_PANEL, COL_BORDER);
 
-    let bx = x;
-    let by = y + 18;
-    let bw = w;
-    let bh = 12u32;
+    let title = MonoTextStyle::new(&FONT_6X10, COL_MUTED);
+    let percent = MonoTextStyle::new(&FONT_9X15, col);
+    let top = TextStyleBuilder::new().baseline(Baseline::Top).build();
+    let tr = TextStyleBuilder::new()
+        .alignment(Alignment::Right)
+        .baseline(Baseline::Top)
+        .build();
+    let _ = Text::with_text_style(side, Point::new(x + 10, y + 8), title, top).draw(display);
+    let _ = Text::with_text_style(&label, Point::new(x + w - 12, y + 5), percent, tr).draw(display);
+
+    let bx = x + 10;
+    let by = y + 32;
+    let bw = w - 26;
+    let bh = 9u32;
     let _ = Rectangle::new(Point::new(bx, by), Size::new(bw as u32, bh))
         .into_styled(PrimitiveStyle::with_fill(COL_BAR_BG))
         .draw(display);
+    let _ = Rectangle::new(Point::new(bx, by), Size::new(bw as u32, bh))
+        .into_styled(PrimitiveStyle::with_stroke(COL_BORDER, 1))
+        .draw(display);
+    let _ = Rectangle::new(Point::new(bx + bw + 2, by + 3), Size::new(4, 3))
+        .into_styled(PrimitiveStyle::with_fill(COL_BORDER))
+        .draw(display);
     if let Some(pct) = fill_pct {
         if pct > 0 {
-            let fw = ((bw as u32) * pct as u32 / 100).max(2);
+            let inner = (bw - 4).max(1) as u32;
+            let fw = (inner * pct as u32 / 100).max(2);
             let fc = if pct < 10 {
                 COL_RED
             } else if pct < 25 {
@@ -909,7 +978,7 @@ fn draw_bat<D: DrawTarget<Color = Rgb565>>(
             } else {
                 COL_BAR_FG
             };
-            let _ = Rectangle::new(Point::new(bx, by), Size::new(fw, bh))
+            let _ = Rectangle::new(Point::new(bx + 2, by + 2), Size::new(fw, bh - 4))
                 .into_styled(PrimitiveStyle::with_fill(fc))
                 .draw(display);
         }
