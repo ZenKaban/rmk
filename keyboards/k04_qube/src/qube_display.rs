@@ -42,7 +42,6 @@ use rmk::event::{
 };
 use rmk::processor::Processor;
 use rmk_types::battery::BatteryStatus;
-use rmk_types::ble::BleState;
 use static_cell::StaticCell;
 
 // --- Panel geometry ---------------------------------------------------------
@@ -73,7 +72,6 @@ const COL_LABEL: Rgb565 = Rgb565::new(16, 36, 28);
 const COL_DIM: Rgb565 = Rgb565::new(5, 12, 14);
 const COL_ACCENT: Rgb565 = Rgb565::new(3, 38, 31);
 const COL_ACCENT_DIM: Rgb565 = Rgb565::new(1, 16, 18);
-const COL_AMBER: Rgb565 = Rgb565::new(31, 43, 5);
 const COL_YELLOW: Rgb565 = Rgb565::new(31, 50, 0);
 const COL_RED: Rgb565 = Rgb565::new(31, 5, 5);
 const COL_BAR_BG: Rgb565 = Rgb565::new(2, 7, 9);
@@ -669,9 +667,7 @@ impl DisplayRenderer<Rgb565> for QubeStatusRenderer {
 
         let layer_meta = MonoTextStyle::new(&FONT_6X10, COL_LABEL);
         let body = MonoTextStyle::new(&FONT_8X13, COL_FG);
-        let body_muted = MonoTextStyle::new(&FONT_8X13, COL_MUTED);
         let body_accent = MonoTextStyle::new(&FONT_8X13, COL_ACCENT);
-        let body_amber = MonoTextStyle::new(&FONT_8X13, COL_AMBER);
         let title_shadow = MonoTextStyle::new(&FONT_10X20, COL_ACCENT_DIM);
         let title = MonoTextStyle::new(&FONT_10X20, COL_FG);
         let top = TextStyleBuilder::new().baseline(Baseline::Top).build();
@@ -693,11 +689,6 @@ impl DisplayRenderer<Rgb565> for QubeStatusRenderer {
         let lp = battery_reading(ctx.peripheral_batteries.first().map(|b| b.0));
         let rp = battery_reading(ctx.peripheral_batteries.get(1).map(|b| b.0));
         let name = layer_name(ctx.layer);
-        let ble_on = matches!(
-            ctx.ble_status.state,
-            BleState::Connected | BleState::Advertising
-        );
-        let ble_ok = ctx.ble_status.state == BleState::Connected;
 
         // Header.
         draw_panel(display, SAFE_X, 14, SAFE_W, 28, COL_PANEL, COL_BORDER_DIM);
@@ -710,21 +701,11 @@ impl DisplayRenderer<Rgb565> for QubeStatusRenderer {
         let _ =
             Text::with_text_style(&s, Point::new(SCREEN_W as i32 / 2, 21), body, tc).draw(display);
         s.clear();
-        let _ = write!(
-            &mut s,
-            "USB  BLE{}",
-            ctx.ble_status.profile.saturating_add(1)
-        );
+        let _ = s.push_str("USB HOST");
         let _ = Text::with_text_style(
             &s,
             Point::new(SAFE_X + SAFE_W as i32 - 13, 21),
-            if ble_ok {
-                body_accent
-            } else if ble_on {
-                body_amber
-            } else {
-                body_muted
-            },
+            body_accent,
             tr,
         )
         .draw(display);
