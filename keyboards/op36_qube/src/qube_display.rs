@@ -69,6 +69,7 @@ const BAR_RADIUS: u32 = 5;
 const COL_BG: Rgb565 = Rgb565::new(0, 2, 4);
 const COL_FG: Rgb565 = Rgb565::new(29, 61, 30);
 const COL_MUTED: Rgb565 = Rgb565::new(11, 24, 20);
+const COL_LABEL: Rgb565 = Rgb565::new(16, 36, 28);
 const COL_DIM: Rgb565 = Rgb565::new(5, 12, 14);
 const COL_ACCENT: Rgb565 = Rgb565::new(3, 38, 31);
 const COL_ACCENT_DIM: Rgb565 = Rgb565::new(1, 16, 18);
@@ -666,7 +667,7 @@ impl DisplayRenderer<Rgb565> for QubeStatusRenderer {
     fn render<D: DrawTarget<Color = Rgb565>>(&mut self, ctx: &RenderContext, display: &mut D) {
         let _ = display.clear(COL_BG);
 
-        let small_dim = MonoTextStyle::new(&FONT_6X10, COL_DIM);
+        let layer_meta = MonoTextStyle::new(&FONT_6X10, COL_LABEL);
         let body = MonoTextStyle::new(&FONT_8X13, COL_FG);
         let body_muted = MonoTextStyle::new(&FONT_8X13, COL_MUTED);
         let body_accent = MonoTextStyle::new(&FONT_8X13, COL_ACCENT);
@@ -740,7 +741,7 @@ impl DisplayRenderer<Rgb565> for QubeStatusRenderer {
         );
         s.clear();
         let _ = write!(&mut s, "LAYER {}", ctx.layer);
-        let _ = Text::with_text_style(&s, Point::new(SCREEN_W as i32 / 2, 66), small_dim, tc)
+        let _ = Text::with_text_style(&s, Point::new(SCREEN_W as i32 / 2, 66), layer_meta, tc)
             .draw(display);
         let _ = Text::with_text_style(
             name,
