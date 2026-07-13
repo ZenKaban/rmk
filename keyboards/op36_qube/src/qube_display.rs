@@ -668,7 +668,6 @@ impl DisplayRenderer<Rgb565> for QubeStatusRenderer {
         let small = MonoTextStyle::new(&FONT_6X10, COL_MUTED);
         let small_dim = MonoTextStyle::new(&FONT_6X10, COL_DIM);
         let body = MonoTextStyle::new(&FONT_9X15, COL_FG);
-        let layer_title = MonoTextStyle::new(&FONT_9X18_BOLD, COL_FG);
         let body_muted = MonoTextStyle::new(&FONT_9X15, COL_MUTED);
         let body_accent = MonoTextStyle::new(&FONT_9X15, COL_ACCENT);
         let body_amber = MonoTextStyle::new(&FONT_9X15, COL_AMBER);
@@ -734,8 +733,16 @@ impl DisplayRenderer<Rgb565> for QubeStatusRenderer {
         let _ = write!(&mut s, "LAYER {}", ctx.layer);
         let _ =
             Text::with_text_style(&s, Point::new(SCREEN_W as i32 / 2, 69), small, tc).draw(display);
-        let _ = Text::with_text_style(name, Point::new(SCREEN_W as i32 / 2, 92), layer_title, tc)
-            .draw(display);
+        draw_text_scaled_centered(
+            display,
+            name,
+            SCREEN_W as i32 / 2,
+            87,
+            &FONT_9X18_BOLD,
+            COL_FG,
+            4,
+            3,
+        );
 
         // Modifier chips.
         draw_panel(display, SAFE_X, 138, SAFE_W, 27, COL_PANEL, COL_BORDER);
@@ -844,6 +851,69 @@ fn draw_chip<D: DrawTarget<Color = Rgb565>>(
         .build();
     let _ =
         Text::with_text_style(label, Point::new(x + w as i32 / 2, y + 3), text, tc).draw(display);
+}
+
+fn draw_text_scaled_centered<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    text: &str,
+    center_x: i32,
+    top_y: i32,
+    font: &embedded_graphics::mono_font::MonoFont<'_>,
+    color: Rgb565,
+    scale_num: i32,
+    scale_den: i32,
+) {
+    let scale_den = scale_den.max(1);
+    let char_w = font.character_size.width as i32;
+    let w = ((text.chars().count() as i32 * char_w * scale_num) + scale_den - 1) / scale_den;
+    let top_left = Point::new(center_x - w / 2, top_y);
+    let style = MonoTextStyle::new(font, color);
+    let mut scaler = ScaledDrawTarget {
+        inner: display,
+        origin: top_left,
+        scale_num,
+        scale_den,
+    };
+    let _ = Text::new(text, Point::zero(), style).draw(&mut scaler);
+}
+
+struct ScaledDrawTarget<'a, D> {
+    inner: &'a mut D,
+    origin: Point,
+    scale_num: i32,
+    scale_den: i32,
+}
+
+impl<D: DrawTarget<Color = Rgb565>> OriginDimensions for ScaledDrawTarget<'_, D> {
+    fn size(&self) -> Size {
+        Size::new(SCREEN_W as u32, SCREEN_H as u32)
+    }
+}
+
+impl<D: DrawTarget<Color = Rgb565>> DrawTarget for ScaledDrawTarget<'_, D> {
+    type Color = Rgb565;
+    type Error = core::convert::Infallible;
+
+    fn draw_iter<I>(&mut self, pixels: I) -> Result<(), Self::Error>
+    where
+        I: IntoIterator<Item = Pixel<Rgb565>>,
+    {
+        for Pixel(p, col) in pixels {
+            let x0 = (p.x * self.scale_num).div_euclid(self.scale_den);
+            let y0 = (p.y * self.scale_num).div_euclid(self.scale_den);
+            let x1 = ((p.x + 1) * self.scale_num).div_euclid(self.scale_den);
+            let y1 = ((p.y + 1) * self.scale_num).div_euclid(self.scale_den);
+            let w = (x1 - x0).max(1) as u32;
+            let h = (y1 - y0).max(1) as u32;
+            let _ = Rectangle::new(
+                Point::new(self.origin.x + x0, self.origin.y + y0),
+                Size::new(w, h),
+            )
+            .into_styled(PrimitiveStyle::with_fill(col))
+            .draw(self.inner);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy)]
