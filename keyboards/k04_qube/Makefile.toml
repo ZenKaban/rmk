@@ -1,0 +1,138 @@
+[tasks.install-llvm-tools]
+install_crate = { rustup_component_name = "llvm-tools" }
+
+[tasks.flip-link]
+install_crate = { crate_name = "flip-link", binary = "flip-link", test_arg = ["-h"] }
+
+[tasks.make-firmware-dir]
+command = "mkdir"
+args = ["-p", "firmware"]
+
+[tasks.build]
+command = "cargo"
+args = ["build", "--release"]
+dependencies = ["install-llvm-tools", "flip-link"]
+
+[tasks.build-qube]
+command = "cargo"
+args = ["build", "--release", "--bin", "qube", "--features", "qube"]
+dependencies = ["install-llvm-tools", "flip-link"]
+
+[tasks.objcopy-qube]
+install_crate = { crate_name = "cargo-binutils", binary = "cargo", test_arg = [
+    "objcopy",
+    "--help",
+] }
+command = "cargo"
+args = [
+    "objcopy",
+    "--release",
+    "--bin",
+    "qube",
+    "--features",
+    "qube",
+    "--",
+    "-O",
+    "ihex",
+    "firmware/k04-qube.hex",
+]
+dependencies = ["build-qube", "make-firmware-dir"]
+
+[tasks.objcopy-left]
+install_crate = { crate_name = "cargo-binutils", binary = "cargo", test_arg = [
+    "objcopy",
+    "--help",
+] }
+command = "cargo"
+args = [
+    "objcopy",
+    "--release",
+    "--bin",
+    "left",
+    "--",
+    "-O",
+    "ihex",
+    "firmware/k04-left.hex",
+]
+dependencies = ["build", "make-firmware-dir"]
+
+[tasks.objcopy-right]
+install_crate = { crate_name = "cargo-binutils", binary = "cargo", test_arg = [
+    "objcopy",
+    "--help",
+] }
+command = "cargo"
+args = [
+    "objcopy",
+    "--release",
+    "--bin",
+    "right",
+    "--",
+    "-O",
+    "ihex",
+    "firmware/k04-right.hex",
+]
+dependencies = ["build", "make-firmware-dir"]
+
+[tasks.uf2-qube]
+install_crate = { crate_name = "cargo-hex-to-uf2", binary = "cargo", test_arg = [
+    "hex-to-uf2",
+    "--help",
+] }
+command = "cargo"
+args = [
+    "hex-to-uf2",
+    "--input-path",
+    "firmware/k04-qube.hex",
+    "--output-path",
+    "firmware/k04-qube.uf2",
+    "--family",
+    "nrf52840",
+]
+dependencies = ["objcopy-qube"]
+
+[tasks.uf2-left]
+install_crate = { crate_name = "cargo-hex-to-uf2", binary = "cargo", test_arg = [
+    "hex-to-uf2",
+    "--help",
+] }
+command = "cargo"
+args = [
+    "hex-to-uf2",
+    "--input-path",
+    "firmware/k04-left.hex",
+    "--output-path",
+    "firmware/k04-left.uf2",
+    "--family",
+    "nrf52840",
+]
+dependencies = ["objcopy-left"]
+
+[tasks.uf2-right]
+install_crate = { crate_name = "cargo-hex-to-uf2", binary = "cargo", test_arg = [
+    "hex-to-uf2",
+    "--help",
+] }
+command = "cargo"
+args = [
+    "hex-to-uf2",
+    "--input-path",
+    "firmware/k04-right.hex",
+    "--output-path",
+    "firmware/k04-right.uf2",
+    "--family",
+    "nrf52840",
+]
+dependencies = ["objcopy-right"]
+
+[tasks.clean-hex]
+command = "rm"
+args = [
+    "-f",
+    "firmware/k04-qube.hex",
+    "firmware/k04-left.hex",
+    "firmware/k04-right.hex",
+]
+
+[tasks.uf2]
+dependencies = ["uf2-qube", "uf2-left", "uf2-right", "clean-hex"]
