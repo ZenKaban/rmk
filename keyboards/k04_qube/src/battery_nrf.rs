@@ -26,15 +26,20 @@ bind_interrupts!(struct SaadcIrqs {
 
 const MEASURED: i32 = 1564;
 const TOTAL: i32 = 2370;
+const EMPTY_RAW_AT_INPUT: i32 = 3413; // 3.0 V * 1137.8
+const FULL_RAW_AT_INPUT: i32 = 4755; // 4.2 V * 1137.8
 
 fn percent(val: u16) -> u8 {
     let val = val as i32;
-    if val > 4755 * MEASURED / TOTAL {
+    let empty = EMPTY_RAW_AT_INPUT * MEASURED / TOTAL;
+    let full = FULL_RAW_AT_INPUT * MEASURED / TOTAL;
+
+    if val >= full {
         100
-    } else if val < 4055 * MEASURED / TOTAL {
+    } else if val <= empty {
         0
     } else {
-        ((val * TOTAL / MEASURED - 4055) / 7) as u8
+        (((val - empty) * 100) / (full - empty)) as u8
     }
 }
 
