@@ -164,8 +164,6 @@ morses = [
   { tap = "A", hold = "LGui", profile = "HRM" },
   { tap = "S", hold = "LAlt", profile = "HRM" },
   { tap = "D", hold = "LCtrl", profile = "HRM" },
-  { tap = "G", hold = "KC_HYPR", profile = "HRM" },
-  { tap = "H", hold = "KC_HYPR", profile = "HRM" },
   { tap = "K", hold = "LCtrl", profile = "HRM" },
   { tap = "L", hold = "LAlt", profile = "HRM" },
   { tap = "Semicolon", hold = "LGui", profile = "HRM" },
