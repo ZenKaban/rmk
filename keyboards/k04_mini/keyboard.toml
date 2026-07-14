@@ -148,3 +148,30 @@ ble_profiles_num = 5
 [storage]
 clear_storage = false
 clear_layout = true
+
+[behavior.morse]
+enable_flow_tap = true
+prior_idle_time = "120ms"
+unilateral_tap = false
+hold_on_other_press = false
+hold_timeout = "220ms"
+gap_timeout = "220ms"
+
+morses = [
+  # td(0): Function key that outputs F1 on tap, F2 on double tap, layer 1 on hold
+  { tap = "Backspace", hold = "MO(1)", profile = "FH" },
+  { tap = "Space", hold = "MO(2)", profile = "FH" },
+  { tap = "A", hold = "LGui", profile = "HRM" },
+  { tap = "S", hold = "LAlt", profile = "HRM" },
+  { tap = "D", hold = "LCtrl", profile = "HRM" },
+  { tap = "G", hold = "Hyper", profile = "HRM" },
+  { tap = "H", hold = "Hyper", profile = "HRM" },
+  { tap = "K", hold = "LCtrl", profile = "HRM" },
+  { tap = "L", hold = "LAlt", profile = "HRM" },
+  { tap = "Semicolon", hold = "LGui", profile = "HRM" },
+  # td(1): Modifier key that outputs Shift on hold, Alt on hold after tap,
+]
+
+[behavior.morse.profiles]
+HRM = { permissive_hold = true, hold_timeout = "220ms", gap_timeout = "220ms" }
+FH = { enable_flow_tap = false, hold_on_other_press = true, hold_timeout = "200ms", gap_timeout = "200ms" }
