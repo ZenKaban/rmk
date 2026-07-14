@@ -30,9 +30,9 @@ name = "Base"
 # Based on Phenom Mini, with the K04 top number row removed.
 keys = """
 Escape  Q     W     E     R     T     Y     U     I     O     P     Backspace
-Tab     A     S     D     F     G     H     J     K     L     Semicolon  Backslash
+Tab     MT(A, LGui, HRM)     MT(S, LAlt, HRM)     MT(D, LCtrl, HRM)     F     G     H     J     MT(K, LCtrl, HRM)     MT(L, LAlt, HRM)     MT(Semicolon, LGui, HRM)  Backslash
 LShift  Z     X     C     V     B     _     _     N     M     Comma  Dot  Quote  RShift
-Grave   LGui  LCtrl MO(1) Space Enter MO(2) LAlt  LeftBracket RightBracket
+Grave   LGui  LCtrl LT(1, Backspace, FH) Space Enter LT(1, Space, FH) LAlt  LeftBracket RightBracket
 """
 # encoders: [central_A1/B1, peripheral_A1/B1]
 encoders = [["AudioVolUp","AudioVolDown"],["AudioVolUp","AudioVolDown"]]
