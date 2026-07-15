@@ -30,6 +30,12 @@ pub struct PeripheralBatteryEvent {
     pub state: BatteryStatusEvent,
 }
 
+/// Runtime settings packet synced from split central to peripherals.
+#[event(channel_size = crate::PERIPHERAL_SETTINGS_EVENT_CHANNEL_SIZE, pubs = crate::PERIPHERAL_SETTINGS_EVENT_PUB_SIZE, subs = crate::PERIPHERAL_SETTINGS_EVENT_SUB_SIZE)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct PeripheralSettingsEvent(pub [u8; 27]);
+
 /// Request a peripheral battery refresh.
 #[cfg(feature = "_ble")]
 #[event(channel_size = crate::PERIPHERAL_BATTERY_REFRESH_EVENT_CHANNEL_SIZE, pubs = crate::PERIPHERAL_BATTERY_REFRESH_EVENT_PUB_SIZE, subs = crate::PERIPHERAL_BATTERY_REFRESH_EVENT_SUB_SIZE)]

@@ -14,8 +14,7 @@ use embassy_nrf::{bind_interrupts, Peri};
 use embassy_time::{with_timeout, Duration, Timer};
 use rmk::core_traits::Runnable;
 use rmk::event::{
-    publish_event, BatteryStatusEvent, EventSubscriber, PeripheralBatteryRefreshEvent,
-    SubscribableEvent,
+    publish_event, BatteryStatusEvent, EventSubscriber, PeripheralBatteryRefreshEvent, SubscribableEvent,
 };
 use rmk::processor::Processor;
 use rmk::types::battery::{BatteryStatus, ChargeState};
@@ -126,11 +125,7 @@ impl Runnable for K04Battery {
         let mut refresh_sub = PeripheralBatteryRefreshEvent::subscriber();
         loop {
             self.publish_sample().await;
-            let _ = select(
-                Timer::after(Duration::from_secs(2)),
-                refresh_sub.next_event(),
-            )
-            .await;
+            let _ = select(Timer::after(Duration::from_secs(2)), refresh_sub.next_event()).await;
         }
     }
 }

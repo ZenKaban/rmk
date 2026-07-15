@@ -77,6 +77,7 @@ impl<const ROW: usize, const COL: usize, const ROW_OFFSET: usize, const COL_OFFS
 
         let mut indicator_sub = crate::event::LedIndicatorEvent::subscriber();
         let mut layer_sub = crate::event::LayerChangeEvent::subscriber();
+        let mut settings_sub = crate::event::PeripheralSettingsEvent::subscriber();
         // Subscribe before the initial send so any change racing past the
         // snapshot is still delivered to us.
         let mut connection_sub = crate::event::ConnectionStatusChangeEvent::subscriber();
@@ -110,6 +111,7 @@ impl<const ROW: usize, const COL: usize, const ROW_OFFSET: usize, const COL_OFFS
                 crate::select_biased_with_feature! {
                     e = indicator_sub.next_event().fuse() => SplitMessage::KeyboardIndicator(e.0.into_bits()),
                     e = layer_sub.next_event().fuse() => SplitMessage::Layer(e.0),
+                    e = settings_sub.next_event().fuse() => SplitMessage::PeripheralSettings(e.0),
                     e = connection_sub.next_event().fuse() => SplitMessage::ConnectionStatus(e.0),
                     with_feature("_ble"): _ = clear_peer_sub.next_event().fuse() => {
                         #[cfg(feature = "storage")]
@@ -134,8 +136,14 @@ impl<const ROW: usize, const COL: usize, const ROW_OFFSET: usize, const COL_OFFS
                 }
             };
 
-            match select(self.transceiver.read(), next_event_to_peri).await {
-                Either::First(read_result) => match read_result {
+            // Keep state updates responsive when peripherals stream pointing reports.
+            match select(next_event_to_peri, self.transceiver.read()).await {
+                Either::First(msg) => {
+                    if self.send(&msg).await.is_err() {
+                        return;
+                    }
+                }
+                Either::Second(read_result) => match read_result {
                     Ok(split_message) => {
                         self.process_peripheral_message(split_message).await;
                     }
@@ -143,11 +151,6 @@ impl<const ROW: usize, const COL: usize, const ROW_OFFSET: usize, const COL_OFFS
                         error!("Peripheral message read error: {:?}", e);
                     }
                 },
-                Either::Second(msg) => {
-                    if self.send(&msg).await.is_err() {
-                        return;
-                    }
-                }
             }
         }
     }

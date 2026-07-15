@@ -53,6 +53,8 @@ pub(crate) enum SplitMessage {
     /// Battery refresh request, from central to peripheral.
     #[cfg(feature = "_ble")]
     BatteryRefresh,
+    /// Runtime settings packet, from central to peripheral.
+    PeripheralSettings([u8; 27]),
     /// WPM from central to peripheral
     #[cfg(feature = "display")]
     Wpm(u16),

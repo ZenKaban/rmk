@@ -24,9 +24,7 @@ use embedded_graphics::mono_font::ascii::{FONT_10X20, FONT_6X10, FONT_8X13, FONT
 use embedded_graphics::mono_font::MonoTextStyle;
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
-use embedded_graphics::primitives::{
-    PrimitiveStyle, PrimitiveStyleBuilder, Rectangle, RoundedRectangle,
-};
+use embedded_graphics::primitives::{PrimitiveStyle, PrimitiveStyleBuilder, Rectangle, RoundedRectangle};
 use embedded_graphics::text::{Alignment, Baseline, Text, TextStyleBuilder};
 use embedded_hal_bus::spi::{ExclusiveDevice, NoDelay};
 use lcd_async::interface::SpiInterface;
@@ -36,9 +34,9 @@ use lcd_async::{Builder, Display as LcdDisplay};
 use rmk::core_traits::Runnable;
 use rmk::display::{DisplayRenderer, RenderContext};
 use rmk::event::{
-    BatteryStatusEvent, CentralConnectedEvent, ConnectionStatusChangeEvent, EventSubscriber,
-    KeyboardEvent, LayerChangeEvent, LedIndicatorEvent, ModifierEvent, PeripheralBatteryEvent,
-    PeripheralConnectedEvent, SleepStateEvent, SubscribableEvent, WpmUpdateEvent,
+    BatteryStatusEvent, CentralConnectedEvent, ConnectionStatusChangeEvent, EventSubscriber, KeyboardEvent,
+    LayerChangeEvent, LedIndicatorEvent, ModifierEvent, PeripheralBatteryEvent, PeripheralConnectedEvent,
+    SleepStateEvent, SubscribableEvent, WpmUpdateEvent,
 };
 use rmk::processor::Processor;
 use rmk_types::battery::BatteryStatus;
@@ -257,10 +255,8 @@ pub struct LazyQubeLcd<I> {
 
 impl<I> LazyQubeLcd<I>
 where
-    I: interrupt::typelevel::Binding<
-            <SPI3 as spim::Instance>::Interrupt,
-            spim::InterruptHandler<SPI3>,
-        > + Copy
+    I: interrupt::typelevel::Binding<<SPI3 as spim::Instance>::Interrupt, spim::InterruptHandler<SPI3>>
+        + Copy
         + 'static,
 {
     async fn ensure_init(&mut self) {
@@ -284,12 +280,7 @@ where
         }
     }
 
-    async fn present_dirty(
-        &mut self,
-        renderer: &mut QubeStatusRenderer,
-        ctx: &RenderContext,
-        dirty: DirtyRegion,
-    ) {
+    async fn present_dirty(&mut self, renderer: &mut QubeStatusRenderer, ctx: &RenderContext, dirty: DirtyRegion) {
         self.ensure_init().await;
         let LcdState::Active(lcd) = &mut self.state else {
             return;
@@ -325,10 +316,8 @@ impl<I> OriginDimensions for LazyQubeLcd<I> {
 
 async fn try_init_lcd<I>(pins: PendingPins, irq: I) -> Option<StripeLcd>
 where
-    I: interrupt::typelevel::Binding<
-            <SPI3 as spim::Instance>::Interrupt,
-            spim::InterruptHandler<SPI3>,
-        > + Copy
+    I: interrupt::typelevel::Binding<<SPI3 as spim::Instance>::Interrupt, spim::InterruptHandler<SPI3>>
+        + Copy
         + 'static,
 {
     let mut spi_cfg = spim::Config::default();
@@ -367,10 +356,8 @@ where
 
 pub struct DongleScreen<I>
 where
-    I: interrupt::typelevel::Binding<
-            <SPI3 as spim::Instance>::Interrupt,
-            spim::InterruptHandler<SPI3>,
-        > + Copy
+    I: interrupt::typelevel::Binding<<SPI3 as spim::Instance>::Interrupt, spim::InterruptHandler<SPI3>>
+        + Copy
         + 'static,
 {
     lcd: LazyQubeLcd<I>,
@@ -396,17 +383,11 @@ pub fn create_processor<I>(
     irq: I,
 ) -> DongleScreen<I>
 where
-    I: interrupt::typelevel::Binding<
-            <SPI3 as spim::Instance>::Interrupt,
-            spim::InterruptHandler<SPI3>,
-        > + Copy
+    I: interrupt::typelevel::Binding<<SPI3 as spim::Instance>::Interrupt, spim::InterruptHandler<SPI3>>
+        + Copy
         + 'static,
 {
-    let level = if BACKLIGHT_ACTIVE_HIGH {
-        Level::High
-    } else {
-        Level::Low
-    };
+    let level = if BACKLIGHT_ACTIVE_HIGH { Level::High } else { Level::Low };
     let backlight = Output::new(bl, level, OutputDrive::Standard);
     let host_data = rmk::host_data::snapshot();
 
@@ -438,10 +419,8 @@ where
 
 impl<I> DongleScreen<I>
 where
-    I: interrupt::typelevel::Binding<
-            <SPI3 as spim::Instance>::Interrupt,
-            spim::InterruptHandler<SPI3>,
-        > + Copy
+    I: interrupt::typelevel::Binding<<SPI3 as spim::Instance>::Interrupt, spim::InterruptHandler<SPI3>>
+        + Copy
         + 'static,
 {
     async fn redraw(&mut self) {
@@ -452,9 +431,7 @@ where
             self.pending = true;
             return;
         }
-        self.lcd
-            .present_dirty(&mut self.renderer, &self.ctx, self.dirty)
-            .await;
+        self.lcd.present_dirty(&mut self.renderer, &self.ctx, self.dirty).await;
         self.ctx.key_press_latch = false;
         self.pending = false;
         self.dirty = DirtyRegion::Full;
@@ -467,11 +444,7 @@ where
     }
 
     fn request_redraw_region(&mut self, dirty: DirtyRegion) {
-        self.dirty = if self.pending {
-            self.dirty.union(dirty)
-        } else {
-            dirty
-        };
+        self.dirty = if self.pending { self.dirty.union(dirty) } else { dirty };
         self.pending = true;
     }
 
@@ -514,10 +487,8 @@ impl EventSubscriber for NeverSub {
 
 impl<I> Runnable for DongleScreen<I>
 where
-    I: interrupt::typelevel::Binding<
-            <SPI3 as spim::Instance>::Interrupt,
-            spim::InterruptHandler<SPI3>,
-        > + Copy
+    I: interrupt::typelevel::Binding<<SPI3 as spim::Instance>::Interrupt, spim::InterruptHandler<SPI3>>
+        + Copy
         + 'static,
 {
     async fn run(&mut self) -> ! {
@@ -636,10 +607,8 @@ enum UiEv {
 
 impl<I> DongleScreen<I>
 where
-    I: interrupt::typelevel::Binding<
-            <SPI3 as spim::Instance>::Interrupt,
-            spim::InterruptHandler<SPI3>,
-        > + Copy
+    I: interrupt::typelevel::Binding<<SPI3 as spim::Instance>::Interrupt, spim::InterruptHandler<SPI3>>
+        + Copy
         + 'static,
 {
     async fn next_any_or_host_tick(
@@ -787,10 +756,8 @@ where
 
 impl<I> Processor for DongleScreen<I>
 where
-    I: interrupt::typelevel::Binding<
-            <SPI3 as spim::Instance>::Interrupt,
-            spim::InterruptHandler<SPI3>,
-        > + Copy
+    I: interrupt::typelevel::Binding<<SPI3 as spim::Instance>::Interrupt, spim::InterruptHandler<SPI3>>
+        + Copy
         + 'static,
 {
     type Event = NeverEvent;
@@ -865,34 +832,16 @@ impl DisplayRenderer<Rgb565> for QubeStatusRenderer {
         draw_media_or_fallback(display, &self.host_data, header_media, header_fallback);
         if host_time_available(&self.host_data) {
             push_host_time(&mut s, self.host_data.hour, self.host_data.minute);
-            let _ =
-                Text::with_text_style(&s, Point::new(SAFE_X + SAFE_W as i32 - 14, 21), body, tr)
-                    .draw(display);
+            let _ = Text::with_text_style(&s, Point::new(SAFE_X + SAFE_W as i32 - 14, 21), body, tr).draw(display);
         }
 
         // Layer panel.
-        draw_panel(
-            display,
-            SAFE_X,
-            52,
-            SAFE_W,
-            84,
-            COL_PANEL_HI,
-            COL_BORDER_DIM,
-        );
+        draw_panel(display, SAFE_X, 52, SAFE_W, 84, COL_PANEL_HI, COL_BORDER_DIM);
         s.clear();
         let _ = write!(&mut s, "LAYER {}", ctx.layer);
-        let _ = Text::with_text_style(&s, Point::new(SCREEN_W as i32 / 2, 66), layer_meta, tc)
-            .draw(display);
-        let _ = Text::with_text_style(
-            name,
-            Point::new(SCREEN_W as i32 / 2 + 1, 101),
-            title_shadow,
-            mc,
-        )
-        .draw(display);
-        let _ = Text::with_text_style(name, Point::new(SCREEN_W as i32 / 2, 100), title, mc)
-            .draw(display);
+        let _ = Text::with_text_style(&s, Point::new(SCREEN_W as i32 / 2, 66), layer_meta, tc).draw(display);
+        let _ = Text::with_text_style(name, Point::new(SCREEN_W as i32 / 2 + 1, 101), title_shadow, mc).draw(display);
+        let _ = Text::with_text_style(name, Point::new(SCREEN_W as i32 / 2, 100), title, mc).draw(display);
         draw_round_fill(display, 104, 125, 72, 2, 1, COL_ACCENT_DIM);
 
         // Modifier chips.
@@ -971,14 +920,7 @@ fn draw_round_fill<D: DrawTarget<Color = Rgb565>>(
         .draw(display);
 }
 
-fn draw_chip<D: DrawTarget<Color = Rgb565>>(
-    display: &mut D,
-    x: i32,
-    y: i32,
-    w: u32,
-    label: &str,
-    active: bool,
-) {
+fn draw_chip<D: DrawTarget<Color = Rgb565>>(display: &mut D, x: i32, y: i32, w: u32, label: &str, active: bool) {
     let text = if active {
         MonoTextStyle::new(&FONT_6X10, COL_FG)
     } else {
@@ -999,8 +941,7 @@ fn draw_chip<D: DrawTarget<Color = Rgb565>>(
         .alignment(Alignment::Center)
         .baseline(Baseline::Top)
         .build();
-    let _ =
-        Text::with_text_style(label, Point::new(x + w as i32 / 2, y + 3), text, tc).draw(display);
+    let _ = Text::with_text_style(label, Point::new(x + w as i32 / 2, y + 3), text, tc).draw(display);
 }
 #[derive(Clone, Copy)]
 enum BatReading {
@@ -1011,9 +952,7 @@ enum BatReading {
 
 fn battery_reading(status: Option<BatteryStatus>) -> BatReading {
     match status {
-        Some(BatteryStatus::Available {
-            level: Some(level), ..
-        }) => BatReading::Pct(level),
+        Some(BatteryStatus::Available { level: Some(level), .. }) => BatReading::Pct(level),
         Some(BatteryStatus::Available { level: None, .. }) => BatReading::Pending,
         Some(BatteryStatus::Unavailable) | None => BatReading::Unknown,
     }
@@ -1028,31 +967,30 @@ fn draw_bat<D: DrawTarget<Color = Rgb565>>(
     connected: bool,
     side: &str,
 ) {
-    let (label, col, fill_pct): (heapless::String<8>, Rgb565, Option<u8>) =
-        match (connected, reading) {
-            (false, _) => {
-                let mut s = heapless::String::new();
-                let _ = s.push_str("--");
-                (s, COL_DIM, None)
-            }
-            (true, BatReading::Unknown) | (true, BatReading::Pending) => {
-                let mut s = heapless::String::new();
-                let _ = s.push_str("??");
-                (s, COL_DIM, None)
-            }
-            (true, BatReading::Pct(p)) => {
-                let mut s = heapless::String::new();
-                let _ = write!(&mut s, "{}%", p);
-                let c = if p < 10 {
-                    COL_RED
-                } else if p < 25 {
-                    COL_YELLOW
-                } else {
-                    COL_FG
-                };
-                (s, c, Some(p))
-            }
-        };
+    let (label, col, fill_pct): (heapless::String<8>, Rgb565, Option<u8>) = match (connected, reading) {
+        (false, _) => {
+            let mut s = heapless::String::new();
+            let _ = s.push_str("--");
+            (s, COL_DIM, None)
+        }
+        (true, BatReading::Unknown) | (true, BatReading::Pending) => {
+            let mut s = heapless::String::new();
+            let _ = s.push_str("??");
+            (s, COL_DIM, None)
+        }
+        (true, BatReading::Pct(p)) => {
+            let mut s = heapless::String::new();
+            let _ = write!(&mut s, "{}%", p);
+            let c = if p < 10 {
+                COL_RED
+            } else if p < 25 {
+                COL_YELLOW
+            } else {
+                COL_FG
+            };
+            (s, c, Some(p))
+        }
+    };
 
     draw_panel(display, x, y, w as u32, 46, COL_PANEL, COL_BORDER_DIM);
 
@@ -1142,8 +1080,7 @@ fn draw_media_or_fallback<D: DrawTarget<Color = Rgb565>>(
 
     if media.is_empty() {
         if !host_time_available(host_data) {
-            let _ = Text::with_text_style("QUBE", Point::new(SAFE_X + 22, 21), fallback_style, top)
-                .draw(display);
+            let _ = Text::with_text_style("QUBE", Point::new(SAFE_X + 22, 21), fallback_style, top).draw(display);
         }
         return;
     }
@@ -1152,15 +1089,12 @@ fn draw_media_or_fallback<D: DrawTarget<Color = Rgb565>>(
     if media.len() <= MEDIA_VISIBLE_CHARS {
         let _ = visible.push_str(&media);
     } else {
-        let elapsed = Instant::now()
-            .duration_since(Instant::from_ticks(0))
-            .as_millis() as usize;
+        let elapsed = Instant::now().duration_since(Instant::from_ticks(0)).as_millis() as usize;
         let offset = (elapsed / 300) % (media.len() + MEDIA_GAP_CHARS);
         push_marquee_slice(&mut visible, &media, offset);
     }
 
-    let _ = Text::with_text_style(&visible, Point::new(SAFE_X + 22, 22), media_style, top)
-        .draw(display);
+    let _ = Text::with_text_style(&visible, Point::new(SAFE_X + 22, 22), media_style, top).draw(display);
 }
 
 fn push_media_label(buffer: &mut heapless::String<72>, host_data: &rmk::host_data::HostData) {
@@ -1177,11 +1111,7 @@ fn push_media_label(buffer: &mut heapless::String<72>, host_data: &rmk::host_dat
 
 fn push_ascii_text<const N: usize>(buffer: &mut heapless::String<N>, value: &str) {
     for ch in value.chars() {
-        let ch = if ch.is_ascii_graphic() || ch == ' ' {
-            ch
-        } else {
-            '?'
-        };
+        let ch = if ch.is_ascii_graphic() || ch == ' ' { ch } else { '?' };
         if buffer.push(ch).is_err() {
             break;
         }
@@ -1193,11 +1123,7 @@ fn push_marquee_slice(buffer: &mut heapless::String<32>, text: &str, offset: usi
     let cycle_len = bytes.len() + MEDIA_GAP_CHARS;
     for i in 0..MEDIA_VISIBLE_CHARS {
         let idx = (offset + i) % cycle_len;
-        let ch = if idx < bytes.len() {
-            bytes[idx] as char
-        } else {
-            ' '
-        };
+        let ch = if idx < bytes.len() { bytes[idx] as char } else { ' ' };
         let _ = buffer.push(ch);
     }
 }

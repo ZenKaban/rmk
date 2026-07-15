@@ -8,6 +8,7 @@ use rmk_config::resolved::hardware::{
 use syn::ItemMod;
 
 use super::central::expand_serial_init;
+use crate::codegen::chip::bind_interrupt::find_extern_irqs;
 use crate::codegen::chip::chip_init::expand_chip_init;
 use crate::codegen::chip::flash::expand_flash_init;
 use crate::codegen::chip::gpio::expand_output_initialization;
@@ -69,10 +70,16 @@ pub(crate) fn parse_split_peripheral_mod(
         quote! {}
     };
 
+    let extern_irqs = find_extern_irqs(&item_mod);
     let main_function = expand_split_peripheral(id, &identity, &hardware, item_mod, &rmk_features);
 
-    let bind_interrupts =
-        expand_bind_interrupt_for_split_peripheral(&hardware.chip, &hardware, id, &rmk_features);
+    let bind_interrupts = expand_bind_interrupt_for_split_peripheral(
+        &hardware.chip,
+        &hardware,
+        id,
+        &rmk_features,
+        extern_irqs,
+    );
 
     let chip = &hardware.chip;
     let main_function_sig = if chip.series == ChipSeries::Esp32 {
@@ -108,6 +115,7 @@ fn expand_bind_interrupt_for_split_peripheral(
     hardware: &Hardware,
     peripheral_id: usize,
     rmk_features: &Option<Vec<String>>,
+    extern_irqs_vec: Vec<TokenStream2>,
 ) -> TokenStream2 {
     let communication = &hardware.communication;
 
@@ -132,6 +140,13 @@ fn expand_bind_interrupt_for_split_peripheral(
         _ => Vec::new(),
     };
     let iqs5xx_interrupt = expand_iqs5xx_interrupts(&chip.series, &iqs5xx_config_for_irq);
+    let extern_irqs = if extern_irqs_vec.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            #(#extern_irqs_vec)*
+        }
+    };
 
     match chip.series {
         ChipSeries::Nrf52 => {
@@ -221,6 +236,7 @@ fn expand_bind_interrupt_for_split_peripheral(
                     #pmw33xx_spi_interrupts
                     #iqs5xx_interrupt
                     #display_interrupt
+                    #extern_irqs
                 });
 
                 #[::embassy_executor::task]
