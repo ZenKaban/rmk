@@ -285,4 +285,3 @@ _ble = ["dep:trouble-host", "dep:bt-hci", "storage", "rmk-types/_ble"]
 doctest = false
 [workspace.dependencies]
 embassy-nrf = { version = "0.10", features = ["nrf52840"] }
-

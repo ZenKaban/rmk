@@ -2,12 +2,20 @@ use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use rmk_types::action::KeyAction;
 use rmk_types::constants::{COMBO_MAX_LENGTH, COMBO_MAX_NUM, MORSE_MAX_NUM};
 use rmk_types::morse::{DOUBLE_TAP, HOLD, HOLD_AFTER_TAP, Morse, MorseMode, TAP};
-use rmk_types::protocol::vial::{SettingKey, VIAL_EP_SIZE, VIAL_PROTOCOL_VERSION, VialCommand, VialDynamic};
+use rmk_types::protocol::vial::{
+    SettingKey, VIAL_EP_SIZE, VIAL_PROTOCOL_VERSION, VialCommand, VialDynamic,
+};
 
+#[cfg(feature = "storage")]
+use crate::channel::FLASH_CHANNEL;
 use crate::config::VialConfig;
 use crate::hid::ViaReport;
 use crate::host::context::KeyboardContext;
 use crate::host::via::keycode_convert::{from_via_keycode, to_via_keycode};
+#[cfg(feature = "storage")]
+use crate::storage::FlashOperationMessage;
+
+const BUILTIN_SETTING_KEYS: &[u16] = &[0x02, 0x06, 0x07, 0x12, 0x13, 0x16, 0x17, 0x1A, 0x1B];
 
 /// Note: vial uses little endian, while via uses big endian
 pub(crate) async fn process_vial<'a>(
@@ -27,7 +35,10 @@ pub(crate) async fn process_vial<'a>(
             debug!("Vial return: {:?}", report.input_data);
         }
         VialCommand::GetSize => {
-            LittleEndian::write_u32(&mut report.input_data[0..4], vial_config.vial_keyboard_def.len() as u32);
+            LittleEndian::write_u32(
+                &mut report.input_data[0..4],
+                vial_config.vial_keyboard_def.len() as u32,
+            );
         }
         VialCommand::GetKeyboardDef => {
             let page = LittleEndian::read_u16(&report.output_data[2..4]) as usize;
@@ -40,9 +51,12 @@ pub(crate) async fn process_vial<'a>(
             if end > vial_keyboard_def.len() {
                 end = vial_keyboard_def.len();
             }
-            vial_keyboard_def[start..end].iter().enumerate().for_each(|(i, v)| {
-                report.input_data[i] = *v;
-            });
+            vial_keyboard_def[start..end]
+                .iter()
+                .enumerate()
+                .for_each(|(i, v)| {
+                    report.input_data[i] = *v;
+                });
             debug!(
                 "Vial return: page:{} start:{} end: {}, data: {:?}",
                 page, start, end, report.input_data
@@ -98,16 +112,24 @@ pub(crate) async fn process_vial<'a>(
         VialCommand::BehaviorSettingQuery => {
             report.input_data.fill(0xFF);
             let value = u16::from_le_bytes([report.output_data[2], report.output_data[3]]);
-            if value <= 8 {
-                LittleEndian::write_u16(&mut report.input_data[0..2], 0x02);
-                LittleEndian::write_u16(&mut report.input_data[2..4], 0x06);
-                LittleEndian::write_u16(&mut report.input_data[4..6], 0x07);
-                LittleEndian::write_u16(&mut report.input_data[6..8], 0x12);
-                LittleEndian::write_u16(&mut report.input_data[8..10], 0x13);
-                LittleEndian::write_u16(&mut report.input_data[10..12], 0x16);
-                LittleEndian::write_u16(&mut report.input_data[12..14], 0x17);
-                LittleEndian::write_u16(&mut report.input_data[14..16], 0x1A);
-                LittleEndian::write_u16(&mut report.input_data[16..18], 0x1B);
+            let mut out_idx = 0usize;
+            for key in BUILTIN_SETTING_KEYS {
+                if *key > value && out_idx + 2 <= report.input_data.len() {
+                    LittleEndian::write_u16(&mut report.input_data[out_idx..out_idx + 2], *key);
+                    out_idx += 2;
+                }
+            }
+            if let Some(device_settings) = vial_config.device_settings {
+                let mut setting_value = [0u8; VIAL_EP_SIZE];
+                for key in device_settings.setting_keys {
+                    if *key > value
+                        && out_idx + 2 <= report.input_data.len()
+                        && (device_settings.get_setting)(*key, &mut setting_value).is_some()
+                    {
+                        LittleEndian::write_u16(&mut report.input_data[out_idx..out_idx + 2], *key);
+                        out_idx += 2;
+                    }
+                }
             }
         }
         VialCommand::GetBehaviorSetting => {
@@ -115,7 +137,19 @@ pub(crate) async fn process_vial<'a>(
             let value = u16::from_le_bytes([report.output_data[2], report.output_data[3]]);
             report.input_data[0] = 0;
             match value.into() {
-                SettingKey::None => report.input_data[0] = 0xFF,
+                SettingKey::None => {
+                    if let Some(device_settings) = vial_config.device_settings {
+                        if let Some(len) =
+                            (device_settings.get_setting)(value, &mut report.input_data[1..])
+                        {
+                            report.input_data[1 + len..].fill(0xFF);
+                        } else {
+                            report.input_data[0] = 0xFF;
+                        }
+                    } else {
+                        report.input_data[0] = 0xFF;
+                    }
+                }
                 SettingKey::ComboTimeout => {
                     let combo_timeout = ctx.combo_timeout().as_millis() as u16;
                     LittleEndian::write_u16(&mut report.input_data[1..3], combo_timeout);
@@ -155,7 +189,10 @@ pub(crate) async fn process_vial<'a>(
                     }
                 }
                 SettingKey::UnilateralTap => {
-                    let unilateral_tap = ctx.morse_default_profile().unilateral_tap().unwrap_or(false);
+                    let unilateral_tap = ctx
+                        .morse_default_profile()
+                        .unilateral_tap()
+                        .unwrap_or(false);
                     if unilateral_tap {
                         report.input_data[1] = 1;
                     } else {
@@ -171,26 +208,49 @@ pub(crate) async fn process_vial<'a>(
         VialCommand::SetBehaviorSetting => {
             let key = u16::from_le_bytes([report.output_data[2], report.output_data[3]]);
             match key.into() {
-                SettingKey::None => (),
+                SettingKey::None => {
+                    report.input_data[0] = 0;
+                    if let Some(device_settings) = vial_config.device_settings {
+                        if (device_settings.set_setting)(key, &report.output_data[4..]) {
+                            #[cfg(feature = "storage")]
+                            FLASH_CHANNEL
+                                .send(FlashOperationMessage::DeviceSettings((device_settings
+                                    .serialize)(
+                                )))
+                                .await;
+                        } else {
+                            report.input_data[0] = 0xFF;
+                        }
+                    } else {
+                        report.input_data[0] = 0xFF;
+                    }
+                }
                 SettingKey::ComboTimeout => {
-                    let combo_timeout = u16::from_le_bytes([report.output_data[4], report.output_data[5]]);
+                    let combo_timeout =
+                        u16::from_le_bytes([report.output_data[4], report.output_data[5]]);
                     ctx.set_combo_timeout(combo_timeout).await;
                 }
                 SettingKey::MorseTimeout => {
-                    let timeout_time = u16::from_le_bytes([report.output_data[4], report.output_data[5]]);
-                    let new_profile = ctx.morse_default_profile().with_hold_timeout_ms(Some(timeout_time));
+                    let timeout_time =
+                        u16::from_le_bytes([report.output_data[4], report.output_data[5]]);
+                    let new_profile = ctx
+                        .morse_default_profile()
+                        .with_hold_timeout_ms(Some(timeout_time));
                     ctx.set_morse_default_profile(new_profile).await;
                 }
                 SettingKey::OneShotTimeout => {
-                    let timeout_time = u16::from_le_bytes([report.output_data[4], report.output_data[5]]);
+                    let timeout_time =
+                        u16::from_le_bytes([report.output_data[4], report.output_data[5]]);
                     ctx.set_one_shot_timeout(timeout_time).await;
                 }
                 SettingKey::TapInterval => {
-                    let tap_interval = u16::from_le_bytes([report.output_data[4], report.output_data[5]]);
+                    let tap_interval =
+                        u16::from_le_bytes([report.output_data[4], report.output_data[5]]);
                     ctx.set_tap_interval(tap_interval).await;
                 }
                 SettingKey::TapCapslockInterval => {
-                    let tap_capslock_interval = u16::from_le_bytes([report.output_data[4], report.output_data[5]]);
+                    let tap_capslock_interval =
+                        u16::from_le_bytes([report.output_data[4], report.output_data[5]]);
                     ctx.set_tap_capslock_interval(tap_capslock_interval).await;
                 }
 
@@ -238,7 +298,8 @@ pub(crate) async fn process_vial<'a>(
                     ctx.set_morse_default_profile(new_profile).await;
                 }
                 SettingKey::PriorIdleTime => {
-                    let prior_idle_time = u16::from_le_bytes([report.output_data[4], report.output_data[5]]);
+                    let prior_idle_time =
+                        u16::from_le_bytes([report.output_data[4], report.output_data[5]]);
                     ctx.set_morse_prior_idle_time(prior_idle_time).await;
                 }
             }
@@ -267,15 +328,25 @@ pub(crate) async fn process_vial<'a>(
                         );
                         LittleEndian::write_u16(
                             &mut report.input_data[3..5],
-                            to_via_keycode(morse.get(HOLD).map_or(KeyAction::No, KeyAction::Single)),
+                            to_via_keycode(
+                                morse.get(HOLD).map_or(KeyAction::No, KeyAction::Single),
+                            ),
                         );
                         LittleEndian::write_u16(
                             &mut report.input_data[5..7],
-                            to_via_keycode(morse.get(DOUBLE_TAP).map_or(KeyAction::No, KeyAction::Single)),
+                            to_via_keycode(
+                                morse
+                                    .get(DOUBLE_TAP)
+                                    .map_or(KeyAction::No, KeyAction::Single),
+                            ),
                         );
                         LittleEndian::write_u16(
                             &mut report.input_data[7..9],
-                            to_via_keycode(morse.get(HOLD_AFTER_TAP).map_or(KeyAction::No, KeyAction::Single)),
+                            to_via_keycode(
+                                morse
+                                    .get(HOLD_AFTER_TAP)
+                                    .map_or(KeyAction::No, KeyAction::Single),
+                            ),
                         );
                         let timeout_ms = morse.profile.hold_timeout_ms().unwrap_or(250);
                         LittleEndian::write_u16(&mut report.input_data[9..11], timeout_ms);
@@ -291,10 +362,14 @@ pub(crate) async fn process_vial<'a>(
 
                     if (morse_idx as usize) < ctx.morses_len() {
                         // Extract morse (also known as "tap dance" in vial)
-                        let tap = from_via_keycode(LittleEndian::read_u16(&report.output_data[4..6]));
-                        let hold = from_via_keycode(LittleEndian::read_u16(&report.output_data[6..8]));
-                        let double_tap = from_via_keycode(LittleEndian::read_u16(&report.output_data[8..10]));
-                        let hold_after_tap = from_via_keycode(LittleEndian::read_u16(&report.output_data[10..12]));
+                        let tap =
+                            from_via_keycode(LittleEndian::read_u16(&report.output_data[4..6]));
+                        let hold =
+                            from_via_keycode(LittleEndian::read_u16(&report.output_data[6..8]));
+                        let double_tap =
+                            from_via_keycode(LittleEndian::read_u16(&report.output_data[8..10]));
+                        let hold_after_tap =
+                            from_via_keycode(LittleEndian::read_u16(&report.output_data[10..12]));
                         let timeout_ms = LittleEndian::read_u16(&report.output_data[12..14]);
 
                         ctx.update_morse(morse_idx, |morse: &mut Morse| {
@@ -317,7 +392,12 @@ pub(crate) async fn process_vial<'a>(
                         if let Some(Some(combo)) = combos.get(combo_idx) {
                             // Combo components
                             for i in 0..COMBO_MAX_LENGTH {
-                                let kc = combo.config.actions.get(i).copied().unwrap_or(KeyAction::No);
+                                let kc = combo
+                                    .config
+                                    .actions
+                                    .get(i)
+                                    .copied()
+                                    .unwrap_or(KeyAction::No);
                                 LittleEndian::write_u16(
                                     &mut report.input_data[1 + i * 2..3 + i * 2],
                                     to_via_keycode(kc),
@@ -325,7 +405,8 @@ pub(crate) async fn process_vial<'a>(
                             }
                             // Combo output
                             LittleEndian::write_u16(
-                                &mut report.input_data[1 + COMBO_MAX_LENGTH * 2..3 + COMBO_MAX_LENGTH * 2],
+                                &mut report.input_data
+                                    [1 + COMBO_MAX_LENGTH * 2..3 + COMBO_MAX_LENGTH * 2],
                                 to_via_keycode(combo.config.output),
                             );
                         } else {
@@ -344,8 +425,9 @@ pub(crate) async fn process_vial<'a>(
                     let mut actions = heapless::Vec::<KeyAction, COMBO_MAX_LENGTH>::new();
                     let mut overflow = false;
                     for i in 0..COMBO_MAX_LENGTH {
-                        let action =
-                            from_via_keycode(LittleEndian::read_u16(&report.output_data[4 + i * 2..6 + i * 2]));
+                        let action = from_via_keycode(LittleEndian::read_u16(
+                            &report.output_data[4 + i * 2..6 + i * 2],
+                        ));
                         if !action.is_empty() && actions.push(action).is_err() {
                             overflow = true;
                             break;
@@ -381,7 +463,10 @@ pub(crate) async fn process_vial<'a>(
         VialCommand::GetEncoder => {
             let layer = report.output_data[2];
             let index = report.output_data[3];
-            debug!("Received Vial - GetEncoder, encoder idx: {} at layer: {}", index, layer);
+            debug!(
+                "Received Vial - GetEncoder, encoder idx: {} at layer: {}",
+                index, layer
+            );
 
             // Get encoder value
             if let Some(encoder_action) = ctx.get_encoder(layer, index) {
@@ -410,7 +495,8 @@ pub(crate) async fn process_vial<'a>(
                 ctx.set_encoder_clockwise(layer, index, action).await;
             } else {
                 info!("Setting counter-clockwise action: {:?}", action);
-                ctx.set_encoder_counter_clockwise(layer, index, action).await;
+                ctx.set_encoder_counter_clockwise(layer, index, action)
+                    .await;
             }
         }
         _ => (),
@@ -432,7 +518,9 @@ mod tests {
     fn test_combo_serialization_deserialization() {
         let mut actions = heapless::Vec::<KeyAction, COMBO_MAX_LENGTH>::new();
         actions
-            .push(KeyAction::Single(Action::Key(KeyCode::Hid(HidKeyCode::Kc1))))
+            .push(KeyAction::Single(Action::Key(KeyCode::Hid(
+                HidKeyCode::Kc1,
+            ))))
             .unwrap();
         let combo_config = ComboConfig {
             actions,

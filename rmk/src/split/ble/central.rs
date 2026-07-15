@@ -260,7 +260,9 @@ fn defaul_central_conn_param() -> RequestedConnParams {
     RequestedConnParams {
         min_connection_interval: Duration::from_micros(7500),
         max_connection_interval: Duration::from_micros(7500),
-        max_latency: 30, // 225ms
+        // Keep active split links awake every interval so central-to-peripheral
+        // layer/state updates reach LEDs without slave-latency delay.
+        max_latency: 0,
         supervision_timeout: Duration::from_secs(5),
         ..Default::default()
     }

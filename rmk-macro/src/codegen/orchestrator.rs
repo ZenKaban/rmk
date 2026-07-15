@@ -226,7 +226,7 @@ fn expand_main(
     let matrix_config = expand_matrix_config(hardware, rmk_features);
     let output_config = expand_output_config(hardware);
     let (ble_config, set_ble_config) = expand_ble_config(hardware);
-    let keymap_and_storage = expand_keymap_and_storage(hardware, layout);
+    let keymap_and_storage = expand_keymap_and_storage(hardware, layout, host);
     let split_central_config = expand_split_central_config(hardware);
     let (input_device_config, devices, processors) = expand_input_device_config(hardware);
     let matrix_and_keyboard = expand_matrix_and_keyboard_init(hardware);
@@ -361,11 +361,11 @@ fn expand_main(
             // Set all keyboard config
             #rmk_config
 
-            // Initialize the registered processors
-            #registered_processor_initializers
-
             // Initialize the storage and keymap, as `storage` and `keymap`
             #keymap_and_storage
+
+            // Initialize the registered processors
+            #registered_processor_initializers
 
             // Initialize the matrix + keyboard, as `matrix` and `keyboard`
             #matrix_and_keyboard
@@ -395,7 +395,11 @@ fn expand_main(
 }
 
 // TODO: move this function to a separate folder
-pub(crate) fn expand_keymap_and_storage(hardware: &Hardware, layout: &Layout) -> TokenStream2 {
+pub(crate) fn expand_keymap_and_storage(
+    hardware: &Hardware,
+    layout: &Layout,
+    host: &Host,
+) -> TokenStream2 {
     let row = layout.rows as usize;
     let col = layout.cols as usize;
 
@@ -438,6 +442,11 @@ pub(crate) fn expand_keymap_and_storage(hardware: &Hardware, layout: &Layout) ->
         let mark = quote! { ::rmk::dfu::mark_booted(); };
         #[cfg(not(any(feature = "dfu_rp", feature = "dfu_nrf")))]
         let mark = quote! {};
+        let vial_config = if host.vial_enabled {
+            quote! { Some(&rmk_config.vial_config), }
+        } else {
+            quote! { None, }
+        };
 
         quote! {
             #initialize_positional_config
@@ -448,6 +457,7 @@ pub(crate) fn expand_keymap_and_storage(hardware: &Hardware, layout: &Layout) ->
                 &rmk_config.storage_config,
                 &mut behavior_config,
                 &per_key_config,
+                #vial_config
             ).await;
             #mark
         }

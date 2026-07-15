@@ -4,7 +4,7 @@
 WHITESPACE = _{ " " | "\t" | "\n" | "\r" }
 
 // Optional comments
-COMMENT = _{ "//" ~ (!"\n" ~ ANY)* } 
+COMMENT = _{ "//" ~ (!"\n" ~ ANY)* }
 
 // --- Helper Rules ---
 
@@ -26,7 +26,7 @@ number = @{ ASCII_DIGIT+ }
 layer_number = @{ number }
 layer_name = @{ loose_identifier }
 
-// The order is important here, as we want to match the number first 
+// The order is important here, as we want to match the number first
 layer_reference = _{ layer_number | layer_name }
 
 // Modifier Names
@@ -49,7 +49,7 @@ no_action = @{ ^"No" ~ !(ASCII_ALPHANUMERIC) } // Case-insensitive "No" not foll
 
 
 // Rule 3: Transparent Key
-transparent_action = @{ ("_")+ | (^"Trns" ~ !ASCII_ALPHANUMERIC) } // One or more underscores or "Trns" followed by non-alphanumeric 
+transparent_action = @{ ("_")+ | (^"Trns" ~ !ASCII_ALPHANUMERIC) } // One or more underscores or "Trns" followed by non-alphanumeric
 
 // Rule 1: WM(key, modifier) - Key with Modifier
 wm_action = { ^"WM" ~ "(" ~ keycode_name ~ "," ~ modifier_combination ~ ")" }

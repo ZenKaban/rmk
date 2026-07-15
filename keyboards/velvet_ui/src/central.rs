@@ -1,47 +1,25 @@
 #![no_main]
 #![no_std]
 
-mod auto_mouse;
+mod battery_nrf;
+mod pointing_mode;
 
 use rmk::macros::rmk_central;
 
 #[rmk_central]
 mod keyboard_central {
-    use crate::auto_mouse::{auto_mouse_tick_task, AutoMouseProcessor};
+    #[register_processor(event)]
+    fn battery() -> crate::battery_nrf::SplitBattery {
+        crate::battery_nrf::SplitBattery::new(p.SAADC, p.P0_31)
+    }
 
-    #[overwritten(entry)]
-    fn custom_entry() {
-        use rmk::input_device::Runnable;
+    #[register_processor(event)]
+    fn pointing_mode() -> crate::pointing_mode::VelvetUiPointingMode {
+        crate::pointing_mode::VelvetUiPointingMode::new()
+    }
 
-        let mut auto_mouse_processor =
-            AutoMouseProcessor::<ROW, COL, NUM_LAYER, NUM_ENCODER>::new(&keymap);
-        let auto_mouse_task = auto_mouse_tick_task::<ROW, COL, NUM_LAYER, NUM_ENCODER>(&keymap);
-
-        ::rmk::embassy_futures::join::join(
-            ::rmk::run_devices!((adc_device, matrix) => ::rmk::channel::EVENT_CHANNEL),
-            ::rmk::embassy_futures::join::join(
-                keyboard.run(),
-                ::rmk::embassy_futures::join::join(
-                    auto_mouse_task,
-                    ::rmk::embassy_futures::join::join(
-                        ::rmk::run_processor_chain!(
-                            ::rmk::channel::EVENT_CHANNEL => [battery_processor, auto_mouse_processor, trackball0_processor],
-                        ),
-                        ::rmk::embassy_futures::join::join(
-                            ::rmk::run_rmk(&keymap, driver, &stack, &mut storage, rmk_config),
-                            ::rmk::embassy_futures::join::join(
-                                ::rmk::split::central::run_peripheral_manager::<4, 6, 4, 0, _>(
-                                    0,
-                                    &peripheral_addrs,
-                                    &stack,
-                                ),
-                                ::rmk::split::ble::central::scan_peripherals(&stack, &peripheral_addrs),
-                            ),
-                        ),
-                    ),
-                ),
-            ),
-        )
-        .await;
+    #[register_processor(poll)]
+    fn ergohaven_user_keys() -> ::rmk::processor::builtin::ergohaven::ErgohavenUserKeys {
+        ::rmk::processor::builtin::ergohaven::ErgohavenUserKeys::new()
     }
 }

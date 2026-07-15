@@ -12,6 +12,11 @@ vial_enabled = true
 # Unlock keys: hold simultaneously to unlock Vial config
 unlock_keys = [[0, 4], [0, 3]]
 
+[event]
+action.channel_size = 16
+action.subs = 2
+keyboard.subs = 4
+
 [layout]
 rows = 8
 cols = 6
@@ -54,7 +59,7 @@ name = "Symbols"
 # Phenom Micro raise layer. All shifted chars use SHIFTED().
 keys = """
 SHIFTED(Kc2)       SHIFTED(Comma)     Equal            SHIFTED(Dot)        Grave          SHIFTED(Kc6)  SHIFTED(Quote)           SHIFTED(Minus)       Quote                 _
-MT(Backslash,LGui) User41             MT(Minus,LShift) User42              SHIFTED(Equal) SHIFTED(Kc5)  User43                   MT(Semicolon,RShift) User44                    User45
+MT(Backslash,LGui) MT(WM(Kc9,LShift),LAlt) MT(Minus,LShift) MT(WM(Kc0,LShift),LCtrl) SHIFTED(Equal) SHIFTED(Kc5)  MT(WM(LeftBracket,LShift),RCtrl) MT(Semicolon,RShift) MT(WM(RightBracket,LShift),RAlt) MT(WM(Kc1,LShift),RGui)
 SHIFTED(Kc3)       SHIFTED(Kc8)       SHIFTED(Semicolon) Slash            _              _            _                        _                   SHIFTED(Backslash)  SHIFTED(Grave) SHIFTED(Kc7) SHIFTED(Kc4)
                   _              MO(3)           _                  _              _                    _
 """
@@ -65,7 +70,7 @@ name = "Adjust"
 # Reference layout: function keys on the left, BT/media controls on the right.
 keys = """
 Bootloader  F1             F2              F3              F4   User19  User20                User21              User22            User23
-LGui        MT(F5,LAlt)    MT(F6,LShift)   MT(F7,LCtrl)    F8   User37  MT(AudioVolDown,RCtrl) MT(AudioMute,RShift) MT(AudioVolUp,RAlt) User46
+LGui        MT(F5,LAlt)    MT(F6,LShift)   MT(F7,LCtrl)    F8   User37  MT(AudioVolDown,RCtrl) MT(AudioMute,RShift) MT(AudioVolUp,RAlt) MT(User26,RGui)
 _           F9             F10             F11             F12  _       _                     User38              MediaPrevTrack    MediaPlayPause  MediaNextTrack User39
                   _   _    _    _      _      _
 """
@@ -84,12 +89,6 @@ encoders = [["MouseWheelDown","MouseWheelUp"],["MouseWheelDown","MouseWheelUp"]]
 
 [ble]
 enabled = true
-# Battery ADC: P0_31 (AIN7), voltage divider 1564k/(806k+1564k)
-# DIV = P0.31/AIN7
-battery_adc_pin = "P0_31"
-# LED = P0.30/AIN6 is driven by K04 layer RGB indication
-adc_divider_measured = 782
-adc_divider_total = 1185
 
 [split]
 connection = "ble"

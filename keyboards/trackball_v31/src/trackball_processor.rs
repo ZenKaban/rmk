@@ -1,415 +1,211 @@
-/// Trackball processor for Trackball Mini v3.1 / v3.0.
-///
-/// Mode switching handled entirely here (NO LT/TH in keyboard.toml):
-/// - MouseBtn1 (RMK)  → normal click + cursor
-/// - User14 (hold)    → Sniper mode (slow cursor)
-/// - User14 (tap)     → MB2 click (right-click) — sent from our code
-/// - MB1 + User14     → Scroll mode (trackball = wheel)
-/// - MB1 + User14 tap → MB3 click (middle button)
-///
-/// keyboard.toml uses: MouseBtn1, User14 (no MouseBtn2 to avoid RMK auto-sending it)
-///
-/// ## Runtime settings via User keycodes:
-/// - User10 = Scroll divisor +1
-/// - User11 = Scroll divisor -1
-/// - User12 = Sniper divisor +1
-/// - User13 = Sniper divisor -1
-use core::cell::RefCell;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+//! Trackball Mini v3.1 mode bridge for root RMK.
+//!
+//! Motion is handled by the generated `PointingProcessor`. This processor only
+//! interprets button actions into mode changes and synthetic MB2/MB3 clicks.
 
-use rmk::embassy_futures::select::{Either, select};
 use embassy_time::{Duration, Instant, Timer};
-use rmk::channel::{CONTROLLER_CHANNEL, KEYBOARD_REPORT_CHANNEL};
-use rmk::event::Event;
+use rmk::channel::send_hid_report;
+use rmk::event::{publish_event_async, ActionEvent, PointingProcessorEvent};
 use rmk::hid::Report;
-use rmk::input_device::{InputProcessor, ProcessResult};
-use rmk::keymap::KeyMap;
+use rmk::input_device::pointing::{CursorConfig, PointingMode, ScrollConfig, SniperConfig};
+use rmk::macros::processor;
+use rmk::types::action::Action;
+use rmk::types::keycode::{HidKeyCode, KeyCode};
 use usbd_hid::descriptor::MouseReport;
 
-// Timing constants
+const TRACKBALL_DEVICE_ID: u8 = 0;
 const COMBO_WINDOW_MS: u32 = 100;
 const COMBO_TAP_MS: u32 = 250;
+const SCROLL_DIVISOR_DEFAULT: u8 = 5;
+const SCROLL_DIVISOR_MIN: u8 = 1;
+const SCROLL_DIVISOR_MAX: u8 = 32;
+const SNIPER_DIVISOR_DEFAULT: u8 = 4;
+const SNIPER_DIVISOR_MIN: u8 = 1;
+const SNIPER_DIVISOR_MAX: u8 = 16;
 
-// Default scroll divisor (higher = slower).
-const SCROLL_DIVISOR_DEFAULT: u32 = 5;
-const SCROLL_DIVISOR_MIN: u32 = 1;
-const SCROLL_DIVISOR_MAX: u32 = 32;
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Cursor,
+    Scroll,
+    Sniper,
+}
 
-// Default sniper divisor.
-const SNIPER_DIVISOR_DEFAULT: u32 = 4;
-const SNIPER_DIVISOR_MIN: u32 = 1;
-const SNIPER_DIVISOR_MAX: u32 = 16;
+#[processor(subscribe = [ActionEvent])]
+pub struct TrackballModeProcessor {
+    mode: Mode,
+    mb1_held: bool,
+    mb2_held: bool,
+    mb1_press_time: u32,
+    mb2_press_time: u32,
+    combo_active: bool,
+    combo_start_time: u32,
+    scroll_divisor: u8,
+    sniper_divisor: u8,
+}
 
-// Normal mode report interval: 16ms ≈ 62Hz
-const NORMAL_REPORT_INTERVAL_MS: u32 = 16;
-
-/// Current mouse button bitmask for HID reports (MB1 via RMK, MB2/MB3 via our code)
-static MOUSE_BUTTONS: AtomicU8 = AtomicU8::new(0);
-
-/// Mode flags (set by tick task, read by processor)
-static MODE_SCROLL: AtomicBool = AtomicBool::new(false);
-static MODE_SNIPER: AtomicBool = AtomicBool::new(false);
-
-/// Runtime-adjustable divisors
-static SCROLL_DIVISOR: AtomicU32 = AtomicU32::new(SCROLL_DIVISOR_DEFAULT);
-static SNIPER_DIVISOR: AtomicU32 = AtomicU32::new(SNIPER_DIVISOR_DEFAULT);
-
-/// Scroll accumulators
-static SCROLL_ACCUM_X: AtomicI32 = AtomicI32::new(0);
-static SCROLL_ACCUM_Y: AtomicI32 = AtomicI32::new(0);
-
-/// Normal mode accumulators + timestamp
-static NORMAL_ACCUM_X: AtomicI32 = AtomicI32::new(0);
-static NORMAL_ACCUM_Y: AtomicI32 = AtomicI32::new(0);
-static LAST_NORMAL_REPORT_MS: AtomicU32 = AtomicU32::new(0);
-
-// AtomicI32 via AtomicU32 bit-cast
-struct AtomicI32(core::sync::atomic::AtomicU32);
-impl AtomicI32 {
-    const fn new(v: i32) -> Self {
-        Self(core::sync::atomic::AtomicU32::new(v as u32))
+impl TrackballModeProcessor {
+    pub fn new() -> Self {
+        Self {
+            mode: Mode::Cursor,
+            mb1_held: false,
+            mb2_held: false,
+            mb1_press_time: 0,
+            mb2_press_time: 0,
+            combo_active: false,
+            combo_start_time: 0,
+            scroll_divisor: SCROLL_DIVISOR_DEFAULT,
+            sniper_divisor: SNIPER_DIVISOR_DEFAULT,
+        }
     }
-    fn load(&self, ord: Ordering) -> i32 {
-        self.0.load(ord) as i32
+
+    async fn on_action_event(&mut self, event: ActionEvent) {
+        let pressed = event.keyboard_event.pressed;
+        let now = now_ms();
+
+        if is_hid(event.action, HidKeyCode::MouseBtn1) {
+            self.on_mb1(pressed, now).await;
+        } else if matches!(event.action, Action::User(14)) {
+            self.on_user14(pressed, now).await;
+        } else if let Action::User(id) = event.action {
+            self.on_adjust_user(id).await;
+        }
     }
-    fn store(&self, v: i32, ord: Ordering) {
-        self.0.store(v as u32, ord);
+
+    async fn on_mb1(&mut self, pressed: bool, now: u32) {
+        self.mb1_held = pressed;
+        if pressed {
+            self.mb1_press_time = now;
+            if self.mb2_held && now.wrapping_sub(self.mb2_press_time) < COMBO_WINDOW_MS {
+                self.start_combo(now).await;
+            }
+        } else if self.combo_active {
+            self.finish_combo(now).await;
+        }
     }
-    fn fetch_add(&self, v: i32, ord: Ordering) -> i32 {
-        self.0.fetch_add(v as u32, ord) as i32
+
+    async fn on_user14(&mut self, pressed: bool, now: u32) {
+        self.mb2_held = pressed;
+        if pressed {
+            self.mb2_press_time = now;
+            if self.mb1_held && now.wrapping_sub(self.mb1_press_time) < COMBO_WINDOW_MS {
+                self.start_combo(now).await;
+            } else {
+                self.set_mode(Mode::Sniper).await;
+            }
+        } else if self.combo_active {
+            self.finish_combo(now).await;
+        } else {
+            let held = now.wrapping_sub(self.mb2_press_time);
+            self.set_mode(Mode::Cursor).await;
+            if held < COMBO_TAP_MS {
+                send_mouse_click(0b0000_0010).await;
+            }
+        }
     }
+
+    async fn on_adjust_user(&mut self, id: u8) {
+        match id {
+            10 => {
+                self.scroll_divisor = self.scroll_divisor.saturating_add(1).min(SCROLL_DIVISOR_MAX);
+                self.republish_mode_if(Mode::Scroll).await;
+            }
+            11 => {
+                self.scroll_divisor = self.scroll_divisor.saturating_sub(1).max(SCROLL_DIVISOR_MIN);
+                self.republish_mode_if(Mode::Scroll).await;
+            }
+            12 => {
+                self.sniper_divisor = self.sniper_divisor.saturating_add(1).min(SNIPER_DIVISOR_MAX);
+                self.republish_mode_if(Mode::Sniper).await;
+            }
+            13 => {
+                self.sniper_divisor = self.sniper_divisor.saturating_sub(1).max(SNIPER_DIVISOR_MIN);
+                self.republish_mode_if(Mode::Sniper).await;
+            }
+            _ => {}
+        }
+    }
+
+    async fn start_combo(&mut self, now: u32) {
+        self.combo_active = true;
+        self.combo_start_time = now;
+        self.set_mode(Mode::Scroll).await;
+    }
+
+    async fn finish_combo(&mut self, now: u32) {
+        let held = now.wrapping_sub(self.combo_start_time);
+        self.combo_active = false;
+        if held < COMBO_TAP_MS {
+            send_mouse_click(0b0000_0100).await;
+        }
+        if self.mb2_held {
+            self.set_mode(Mode::Sniper).await;
+        } else {
+            self.set_mode(Mode::Cursor).await;
+        }
+    }
+
+    async fn republish_mode_if(&mut self, mode: Mode) {
+        if self.mode == mode {
+            self.publish_mode().await;
+        }
+    }
+
+    async fn set_mode(&mut self, mode: Mode) {
+        if self.mode == mode {
+            return;
+        }
+        self.mode = mode;
+        self.publish_mode().await;
+    }
+
+    async fn publish_mode(&self) {
+        publish_event_async(PointingProcessorEvent {
+            device_id: TRACKBALL_DEVICE_ID,
+            mode: self.pointing_mode(),
+        })
+        .await;
+    }
+
+    fn pointing_mode(&self) -> PointingMode {
+        match self.mode {
+            Mode::Cursor => PointingMode::Cursor(CursorConfig::default()),
+            Mode::Scroll => PointingMode::Scroll(ScrollConfig {
+                divisor_x: self.scroll_divisor,
+                divisor_y: self.scroll_divisor,
+                ..Default::default()
+            }),
+            Mode::Sniper => PointingMode::Sniper(SniperConfig {
+                divisor: self.sniper_divisor,
+                ..Default::default()
+            }),
+        }
+    }
+}
+
+fn is_hid(action: Action, hid: HidKeyCode) -> bool {
+    matches!(action, Action::Key(KeyCode::Hid(key)) if key == hid)
 }
 
 fn now_ms() -> u32 {
-    (Instant::now().as_ticks() / (embassy_time::TICK_HZ / 1000)) as u32
+    Instant::now().as_millis() as u32
 }
 
-/// Handle User keycodes for runtime divisor adjustment.
-pub fn handle_user_keycode(keycode_idx: u8) {
-    match keycode_idx {
-        10 => {
-            let v = (SCROLL_DIVISOR.load(Ordering::Relaxed) + 1).min(SCROLL_DIVISOR_MAX);
-            SCROLL_DIVISOR.store(v, Ordering::Relaxed);
-            defmt::info!("Scroll divisor: {}", v);
-        }
-        11 => {
-            let v = SCROLL_DIVISOR.load(Ordering::Relaxed).saturating_sub(1).max(SCROLL_DIVISOR_MIN);
-            SCROLL_DIVISOR.store(v, Ordering::Relaxed);
-            defmt::info!("Scroll divisor: {}", v);
-        }
-        12 => {
-            let v = (SNIPER_DIVISOR.load(Ordering::Relaxed) + 1).min(SNIPER_DIVISOR_MAX);
-            SNIPER_DIVISOR.store(v, Ordering::Relaxed);
-            defmt::info!("Sniper divisor: {}", v);
-        }
-        13 => {
-            let v = SNIPER_DIVISOR.load(Ordering::Relaxed).saturating_sub(1).max(SNIPER_DIVISOR_MIN);
-            SNIPER_DIVISOR.store(v, Ordering::Relaxed);
-            defmt::info!("Sniper divisor: {}", v);
-        }
-        _ => {}
-    }
-}
-
-/// Main trackball InputProcessor.
-pub struct TrackballProcessor<
-    'a,
-    const ROW: usize,
-    const COL: usize,
-    const NUM_LAYER: usize,
-    const NUM_ENCODER: usize = 0,
-> {
-    keymap: &'a RefCell<KeyMap<'a, ROW, COL, NUM_LAYER, NUM_ENCODER>>,
-}
-
-impl<'a, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_ENCODER: usize>
-    TrackballProcessor<'a, ROW, COL, NUM_LAYER, NUM_ENCODER>
-{
-    pub fn new(keymap: &'a RefCell<KeyMap<'a, ROW, COL, NUM_LAYER, NUM_ENCODER>>) -> Self {
-        Self { keymap }
-    }
-}
-
-impl<'a, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_ENCODER: usize>
-    InputProcessor<'a, ROW, COL, NUM_LAYER, NUM_ENCODER>
-    for TrackballProcessor<'a, ROW, COL, NUM_LAYER, NUM_ENCODER>
-{
-    async fn process(&mut self, event: Event) -> ProcessResult {
-        let Event::Joystick(axes) = event else {
-            return ProcessResult::Continue(event);
-        };
-
-        let mut dx: i16 = 0;
-        let mut dy: i16 = 0;
-        for axis in axes.iter() {
-            match axis.axis {
-                rmk::event::Axis::X => dx = axis.value,
-                rmk::event::Axis::Y => dy = axis.value,
-                _ => {}
-            }
-        }
-
-        let scroll = MODE_SCROLL.load(Ordering::Relaxed);
-        let sniper = MODE_SNIPER.load(Ordering::Relaxed);
-
-        if scroll {
-            let divisor = SCROLL_DIVISOR.load(Ordering::Relaxed) as i32;
-            let acc_x = SCROLL_ACCUM_X.fetch_add(dx as i32, Ordering::Relaxed) + dx as i32;
-            let acc_y = SCROLL_ACCUM_Y.fetch_add(dy as i32, Ordering::Relaxed) + dy as i32;
-
-            let wheel = -(acc_y / divisor) as i8;
-            let pan = (acc_x / divisor) as i8;
-
-            if wheel != 0 || pan != 0 {
-                SCROLL_ACCUM_X.store(acc_x % divisor, Ordering::Relaxed);
-                SCROLL_ACCUM_Y.store(acc_y % divisor, Ordering::Relaxed);
-
-                let report = MouseReport { buttons: 0, x: 0, y: 0, wheel, pan };
-                KEYBOARD_REPORT_CHANNEL.send(Report::MouseReport(report)).await;
-            }
-            return ProcessResult::Stop;
-        }
-
-        if sniper {
-            let divisor = SNIPER_DIVISOR.load(Ordering::Relaxed) as i16;
-            let slow_dx = dx / divisor;
-            let slow_dy = dy / divisor;
-
-            if slow_dx != 0 || slow_dy != 0 {
-                let report = MouseReport {
-                    buttons: MOUSE_BUTTONS.load(Ordering::Relaxed),
-                    x: slow_dx.clamp(i8::MIN as i16, i8::MAX as i16) as i8,
-                    y: slow_dy.clamp(i8::MIN as i16, i8::MAX as i16) as i8,
-                    wheel: 0,
-                    pan: 0,
-                };
-                KEYBOARD_REPORT_CHANNEL.send(Report::MouseReport(report)).await;
-            }
-            return ProcessResult::Stop;
-        }
-
-        // Normal mode
-        NORMAL_ACCUM_X.fetch_add(dx as i32, Ordering::Relaxed);
-        NORMAL_ACCUM_Y.fetch_add(dy as i32, Ordering::Relaxed);
-
-        let now = now_ms();
-        let last = LAST_NORMAL_REPORT_MS.load(Ordering::Relaxed);
-        if now.wrapping_sub(last) >= NORMAL_REPORT_INTERVAL_MS {
-            let acc_x = NORMAL_ACCUM_X.load(Ordering::Relaxed);
-            let acc_y = NORMAL_ACCUM_Y.load(Ordering::Relaxed);
-            if acc_x != 0 || acc_y != 0 {
-                NORMAL_ACCUM_X.store(0, Ordering::Relaxed);
-                NORMAL_ACCUM_Y.store(0, Ordering::Relaxed);
-                LAST_NORMAL_REPORT_MS.store(now, Ordering::Relaxed);
-
-                let report = MouseReport {
-                    buttons: MOUSE_BUTTONS.load(Ordering::Relaxed),
-                    x: acc_x.clamp(i8::MIN as i32, i8::MAX as i32) as i8,
-                    y: acc_y.clamp(i8::MIN as i32, i8::MAX as i32) as i8,
-                    wheel: 0,
-                    pan: 0,
-                };
-                KEYBOARD_REPORT_CHANNEL.send(Report::MouseReport(report)).await;
-            }
-        }
-        ProcessResult::Stop
-    }
-
-    fn get_keymap(&self) -> &RefCell<KeyMap<'a, ROW, COL, NUM_LAYER, NUM_ENCODER>> {
-        self.keymap
-    }
-}
-
-/// Send an MB2 press+release cycle via HID.
-async fn send_mb2_click() {
-    defmt::info!("Sending MB2 click");
-    let press = MouseReport { buttons: 0b00000010, x: 0, y: 0, wheel: 0, pan: 0 };
-    let release = MouseReport { buttons: 0, x: 0, y: 0, wheel: 0, pan: 0 };
-    KEYBOARD_REPORT_CHANNEL.send(Report::MouseReport(press)).await;
+async fn send_mouse_click(buttons: u8) {
+    send_hid_report(Report::MouseReport(MouseReport {
+        buttons,
+        x: 0,
+        y: 0,
+        wheel: 0,
+        pan: 0,
+    }))
+    .await;
     Timer::after(Duration::from_millis(10)).await;
-    KEYBOARD_REPORT_CHANNEL.send(Report::MouseReport(release)).await;
-}
-
-/// Send an MB3 press+release cycle via HID.
-async fn send_mb3_click() {
-    defmt::info!("Sending MB3 click");
-    let press = MouseReport { buttons: 0b00000100, x: 0, y: 0, wheel: 0, pan: 0 };
-    let release = MouseReport { buttons: 0, x: 0, y: 0, wheel: 0, pan: 0 };
-    KEYBOARD_REPORT_CHANNEL.send(Report::MouseReport(press)).await;
-    Timer::after(Duration::from_millis(10)).await;
-    KEYBOARD_REPORT_CHANNEL.send(Report::MouseReport(release)).await;
-}
-
-/// Background task: button-driven mode switching + combo detection.
-///
-/// Button mapping (User14 is the "right button" keycode):
-/// - User14 hold alone  → Sniper mode (slow cursor, NO right-click sent)
-/// - User14 tap alone   → MB2 click (right-click)
-/// - MB1 + User14 hold  → Scroll mode
-/// - MB1 + User14 tap   → MB3 click (middle-button)
-/// - MB1 alone          → normal click (handled by RMK)
-#[embassy_executor::task]
-pub async fn trackball_tick_task() {
-    let mut sub = defmt::unwrap!(CONTROLLER_CHANNEL.subscriber());
-
-    // Button state tracking
-    let mut mb1_held = false;
-    let mut mb2_held = false;
-    let mut mb1_press_time: u32 = 0;
-    let mut mb2_press_time: u32 = 0;
-    let mut combo_active = false;
-    let mut combo_start_time: u32 = 0;
-
-    loop {
-        match select(
-            Timer::after(Duration::from_millis(500)),
-            sub.next_message_pure(),
-        )
-        .await
-        {
-            Either::First(_) => {
-                // Periodic cleanup
-                if !MODE_SCROLL.load(Ordering::Relaxed) {
-                    SCROLL_ACCUM_X.store(0, Ordering::Relaxed);
-                    SCROLL_ACCUM_Y.store(0, Ordering::Relaxed);
-                }
-            }
-            Either::Second(event) => {
-                use rmk::event::ControllerEvent;
-                match event {
-                    ControllerEvent::Key(_key_event, action) => {
-                        use rmk::types::action::{Action, KeyAction};
-                        use rmk::types::keycode::KeyCode;
-
-                        if let KeyAction::Single(Action::Key(kc)) = action {
-                            let now = now_ms();
-
-                            match kc {
-                                KeyCode::MouseBtn1 => {
-                                    // Toggle: RMK sends this on both press and release
-                                    mb1_held = !mb1_held;
-
-                                    if mb1_held {
-                                        // MB1 pressed
-                                        mb1_press_time = now;
-                                        MOUSE_BUTTONS.store(
-                                            MOUSE_BUTTONS.load(Ordering::Relaxed) | (1 << 0),
-                                            Ordering::Relaxed,
-                                        );
-                                        // Check combo: MB2 already held?
-                                        if mb2_held && now.wrapping_sub(mb2_press_time) < COMBO_WINDOW_MS {
-                                            combo_active = true;
-                                            combo_start_time = now;
-                                            MODE_SCROLL.store(true, Ordering::Relaxed);
-                                            MODE_SNIPER.store(false, Ordering::Relaxed);
-                                            SCROLL_ACCUM_X.store(0, Ordering::Relaxed);
-                                            SCROLL_ACCUM_Y.store(0, Ordering::Relaxed);
-                                            defmt::info!("Combo: Scroll ON");
-                                        }
-                                    } else {
-                                        // MB1 released
-                                        MOUSE_BUTTONS.store(
-                                            MOUSE_BUTTONS.load(Ordering::Relaxed) & !(1 << 0),
-                                            Ordering::Relaxed,
-                                        );
-                                        if combo_active {
-                                            let held = now.wrapping_sub(combo_start_time);
-                                            combo_active = false;
-                                            MODE_SCROLL.store(false, Ordering::Relaxed);
-                                            SCROLL_ACCUM_X.store(0, Ordering::Relaxed);
-                                            SCROLL_ACCUM_Y.store(0, Ordering::Relaxed);
-
-                                            if held < COMBO_TAP_MS {
-                                                // Short combo → MB3
-                                                send_mb3_click().await;
-                                            }
-                                            // Back to sniper if MB2 still held
-                                            if mb2_held {
-                                                MODE_SNIPER.store(true, Ordering::Relaxed);
-                                            }
-                                            defmt::info!("Combo: Scroll OFF");
-                                        }
-                                    }
-                                }
-                                KeyCode::User14 => {
-                                    // "Right button" — handled entirely by us (no RMK HID)
-                                    mb2_held = !mb2_held;
-
-                                    if mb2_held {
-                                        // User14 pressed
-                                        mb2_press_time = now;
-                                        // Check combo: MB1 already held?
-                                        if mb1_held && now.wrapping_sub(mb1_press_time) < COMBO_WINDOW_MS {
-                                            combo_active = true;
-                                            combo_start_time = now;
-                                            MODE_SCROLL.store(true, Ordering::Relaxed);
-                                            MODE_SNIPER.store(false, Ordering::Relaxed);
-                                            SCROLL_ACCUM_X.store(0, Ordering::Relaxed);
-                                            SCROLL_ACCUM_Y.store(0, Ordering::Relaxed);
-                                            defmt::info!("Combo: Scroll ON");
-                                        } else {
-                                            // Solo User14 -> Sniper mode
-                                            MODE_SNIPER.store(true, Ordering::Relaxed);
-                                            defmt::info!("Sniper ON");
-                                        }
-                                    } else {
-                                        // User14 released
-                                        if combo_active {
-                                            let held = now.wrapping_sub(combo_start_time);
-                                            combo_active = false;
-                                            MODE_SCROLL.store(false, Ordering::Relaxed);
-                                            SCROLL_ACCUM_X.store(0, Ordering::Relaxed);
-                                            SCROLL_ACCUM_Y.store(0, Ordering::Relaxed);
-
-                                            if held < COMBO_TAP_MS {
-                                                send_mb3_click().await;
-                                            }
-                                            // Back to sniper if MB1 still held? No — MB1 is for scrolling
-                                            if mb2_held {
-                                                MODE_SNIPER.store(true, Ordering::Relaxed);
-                                            }
-                                            defmt::info!("Combo: Scroll OFF");
-                                        } else {
-                                            // Solo User14 released
-                                            let held = now.wrapping_sub(mb2_press_time);
-                                            MODE_SNIPER.store(false, Ordering::Relaxed);
-                                            defmt::info!("Sniper OFF");
-
-                                            // If tap (short press) → send MB2 click
-                                            if held < COMBO_TAP_MS {
-                                                send_mb2_click().await;
-                                            }
-                                            // If hold → no MB2 sent, was just sniper
-                                        }
-                                    }
-                                }
-                                KeyCode::User10 => {
-                                    let v = (SCROLL_DIVISOR.load(Ordering::Relaxed) + 1).min(SCROLL_DIVISOR_MAX);
-                                    SCROLL_DIVISOR.store(v, Ordering::Relaxed);
-                                    defmt::info!("Scroll divisor: {}", v);
-                                }
-                                KeyCode::User11 => {
-                                    let v = SCROLL_DIVISOR.load(Ordering::Relaxed).saturating_sub(1).max(SCROLL_DIVISOR_MIN);
-                                    SCROLL_DIVISOR.store(v, Ordering::Relaxed);
-                                    defmt::info!("Scroll divisor: {}", v);
-                                }
-                                KeyCode::User12 => {
-                                    let v = (SNIPER_DIVISOR.load(Ordering::Relaxed) + 1).min(SNIPER_DIVISOR_MAX);
-                                    SNIPER_DIVISOR.store(v, Ordering::Relaxed);
-                                    defmt::info!("Sniper divisor: {}", v);
-                                }
-                                KeyCode::User13 => {
-                                    let v = SNIPER_DIVISOR.load(Ordering::Relaxed).saturating_sub(1).max(SNIPER_DIVISOR_MIN);
-                                    SNIPER_DIVISOR.store(v, Ordering::Relaxed);
-                                    defmt::info!("Sniper divisor: {}", v);
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
+    send_hid_report(Report::MouseReport(MouseReport {
+        buttons: 0,
+        x: 0,
+        y: 0,
+        wheel: 0,
+        pan: 0,
+    }))
+    .await;
 }

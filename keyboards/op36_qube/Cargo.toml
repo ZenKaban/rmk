@@ -24,7 +24,7 @@ qube = [
 ]
 
 [dependencies]
-rmk = { path = "../../common/rmk-main-upstream/rmk", default-features = false, features = [
+rmk = { path = "../../rmk", default-features = false, features = [
     "usb_log",
     "storage",
     "vial",
@@ -38,7 +38,7 @@ rmk = { path = "../../common/rmk-main-upstream/rmk", default-features = false, f
 embedded-hal-bus = { version = "0.3", features = ["async"], optional = true }
 embedded-graphics = { version = "0.8", optional = true }
 lcd-async = { version = "0.1", optional = true }
-rmk-types = { path = "../../common/rmk-main-upstream/rmk-types", optional = true }
+rmk-types = { path = "../../rmk-types", optional = true }
 heapless = "0.9"
 embassy-futures = "0.1"
 nrf-sdc = { git = "https://github.com/alexmoon/nrf-sdc", rev = "abe49d22ebfc85fae134eb082fbfddf752016a55", features = [

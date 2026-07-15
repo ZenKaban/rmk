@@ -111,6 +111,10 @@ impl<S: SplitWriter + SplitReader> SplitPeripheral<S> {
                                 )))
                                 .await;
                         }
+                        #[cfg(feature = "_ble")]
+                        SplitMessage::BatteryRefresh => {
+                            publish_event(crate::event::PeripheralBatteryRefreshEvent);
+                        }
                         SplitMessage::KeyboardIndicator(indicator) => {
                             // Publish KeyboardIndicator event
                             publish_event(LedIndicatorEvent::new(
@@ -120,6 +124,9 @@ impl<S: SplitWriter + SplitReader> SplitPeripheral<S> {
                         SplitMessage::Layer(layer) => {
                             // Publish Layer event
                             publish_event(LayerChangeEvent::new(layer));
+                        }
+                        SplitMessage::PeripheralSettings(settings) => {
+                            publish_event(crate::event::PeripheralSettingsEvent(settings));
                         }
                         #[cfg(feature = "display")]
                         SplitMessage::Wpm(wpm) => {

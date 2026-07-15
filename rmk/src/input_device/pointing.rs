@@ -9,9 +9,15 @@ use rmk_types::keycode::HidKeyCode;
 use usbd_hid::descriptor::MouseReport;
 
 use crate::channel::send_hid_report;
-use crate::event::{Axis, AxisEvent, AxisValType, PointingEvent, PointingProcessorEvent, PointingSetCpiEvent};
+use crate::event::{
+    Axis, AxisEvent, AxisValType, PointingEvent, PointingProcessorEvent, PointingSetCpiEvent,
+};
+#[cfg(feature = "split")]
+use crate::event::{ActionEvent, KeyboardEvent, PeripheralSettingsEvent};
 use crate::hid::{KeyboardReport, Report};
 use crate::keymap::KeyMap;
+#[cfg(feature = "split")]
+use rmk_types::action::Action;
 
 pub const ALL_POINTING_DEVICES: u8 = 255;
 
@@ -498,6 +504,683 @@ impl Default for PointingProcessorConfig {
     }
 }
 
+/// Minimal pointing processor for dongles without a local keymap context.
+#[processor(subscribe = [PointingEvent])]
+pub struct SimplePointingProcessor {
+    config: PointingProcessorConfig,
+}
+
+impl SimplePointingProcessor {
+    pub fn new(config: PointingProcessorConfig) -> Self {
+        Self { config }
+    }
+
+    async fn on_pointing_event(&mut self, event: PointingEvent) {
+        if self.config.device_id != ALL_POINTING_DEVICES && event.device_id != self.config.device_id {
+            return;
+        }
+
+        let mut x = 0i16;
+        let mut y = 0i16;
+        let mut wheel = 0i16;
+        let mut pan = 0i16;
+
+        for axis_event in event.axes.iter() {
+            match axis_event.axis {
+                Axis::X => x = axis_event.value,
+                Axis::Y => y = axis_event.value,
+                Axis::V => wheel = axis_event.value,
+                Axis::H => pan = axis_event.value,
+                _ => {}
+            }
+        }
+
+        if self.config.invert_x {
+            x = -x;
+        }
+        if self.config.invert_y {
+            y = -y;
+        }
+        if self.config.swap_xy {
+            (x, y) = (y, x);
+        }
+
+        send_hid_report(Report::MouseReport(MouseReport {
+            buttons: 0,
+            x: x.clamp(i8::MIN as i16, i8::MAX as i16) as i8,
+            y: y.clamp(i8::MIN as i16, i8::MAX as i16) as i8,
+            wheel: wheel.clamp(i8::MIN as i16, i8::MAX as i16) as i8,
+            pan: pan.clamp(i8::MIN as i16, i8::MAX as i16) as i8,
+        }))
+        .await;
+    }
+}
+
+const QUBE_USER_SNIPER: u8 = 28;
+const QUBE_USER_SCROLL: u8 = 29;
+const QUBE_USER_TEXT: u8 = 30;
+const QUBE_USER_LEFT_SNIPER: u8 = 31;
+const QUBE_USER_LEFT_SCROLL: u8 = 32;
+const QUBE_USER_LEFT_TEXT: u8 = 33;
+const QUBE_USER_RIGHT_SNIPER: u8 = 34;
+const QUBE_USER_RIGHT_SCROLL: u8 = 35;
+const QUBE_USER_RIGHT_TEXT: u8 = 36;
+const QUBE_SETTINGS_VERSION: u8 = 9;
+const QUBE_AUTO_LAYER_NONE: u8 = 0xff;
+const QUBE_MODE_KEY_TAP_MS: u32 = 220;
+const QUBE_TEXT_AXIS_IDLE_MS: u32 = 220;
+const QUBE_TEXT_THRESHOLD: i32 = 1;
+const QUBE_AUTO_LAYER_TIMEOUT_MS_TABLE: [u32; 6] = [250, 500, 750, 1000, 1250, 1500];
+const QUBE_DEFAULT_AUTO_LAYER_TIMEOUT_INDEX: u8 = 1;
+const QUBE_MODULE_SELECT_BALL: u8 = 2;
+const QUBE_MODULE_SELECT_TOUCH: u8 = 3;
+const QUBE_FLAG_LEFT_INVERT_SCROLL_Y: u8 = 1 << 0;
+const QUBE_FLAG_RIGHT_INVERT_SCROLL_Y: u8 = 1 << 1;
+const QUBE_FLAG_LEFT_INVERT_TEXT_Y: u8 = 1 << 2;
+const QUBE_FLAG_RIGHT_INVERT_TEXT_Y: u8 = 1 << 3;
+const QUBE_FLAG_LEFT_ACCELERATION: u8 = 1 << 4;
+const QUBE_FLAG_RIGHT_ACCELERATION: u8 = 1 << 5;
+const QUBE_FLAG_LEFT_STICKY: u8 = 1 << 6;
+const QUBE_FLAG_RIGHT_STICKY: u8 = 1 << 7;
+const QUBE_AXIS_FLAG_LEFT_INVERT_SCROLL_X: u8 = 1 << 0;
+const QUBE_AXIS_FLAG_RIGHT_INVERT_SCROLL_X: u8 = 1 << 1;
+const QUBE_AXIS_FLAG_LEFT_INVERT_TEXT_X: u8 = 1 << 2;
+const QUBE_AXIS_FLAG_RIGHT_INVERT_TEXT_X: u8 = 1 << 3;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum QubePointingMode {
+    Normal,
+    Sniper,
+    Scroll,
+    Text,
+}
+
+impl QubePointingMode {
+    fn from_value(value: u8) -> Self {
+        match value.min(3) {
+            1 => Self::Sniper,
+            2 => Self::Scroll,
+            3 => Self::Text,
+            _ => Self::Normal,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum QubePointingKind {
+    Ball,
+    Touch,
+}
+
+#[derive(Clone, Copy)]
+struct QubePointingSource {
+    side: usize,
+    kind: QubePointingKind,
+}
+
+#[derive(Clone, Copy)]
+struct QubePointingSettings {
+    mode: [QubePointingMode; 2],
+    ball_axis: [u8; 2],
+    touch_axis: [u8; 2],
+    scroll_sens: [i32; 2],
+    sniper_sens: [i32; 2],
+    text_sens: [i32; 2],
+    flags: u8,
+    auto_layer: u8,
+    auto_flags: u8,
+    module_select: u8,
+    axis_flags: u8,
+    auto_layer_timeout_index: u8,
+}
+
+impl QubePointingSettings {
+    const fn new() -> Self {
+        Self {
+            mode: [QubePointingMode::Normal; 2],
+            ball_axis: [0; 2],
+            touch_axis: [0; 2],
+            scroll_sens: [8; 2],
+            sniper_sens: [4; 2],
+            text_sens: [16; 2],
+            flags: 0,
+            auto_layer: 4,
+            auto_flags: 1,
+            module_select: (QUBE_MODULE_SELECT_TOUCH << 0) | (QUBE_MODULE_SELECT_BALL << 2),
+            axis_flags: 0,
+            auto_layer_timeout_index: QUBE_DEFAULT_AUTO_LAYER_TIMEOUT_INDEX,
+        }
+    }
+
+    fn apply_packet(&mut self, data: &[u8; 27]) {
+        if data[0] != QUBE_SETTINGS_VERSION {
+            return;
+        }
+        self.mode[0] = QubePointingMode::from_value(data[1] & 0x03);
+        self.mode[1] = QubePointingMode::from_value((data[1] >> 2) & 0x03);
+        self.auto_layer = (data[1] >> 4) & 0x0f;
+        self.ball_axis[0] = data[2] & 0x03;
+        self.ball_axis[1] = (data[2] >> 2) & 0x03;
+        self.touch_axis[0] = (data[2] >> 4) & 0x03;
+        self.touch_axis[1] = (data[2] >> 6) & 0x03;
+        self.scroll_sens[0] = i32::from(data[5].max(1));
+        self.sniper_sens[0] = i32::from(data[6].max(1));
+        self.text_sens[0] = i32::from(data[7].max(1));
+        self.scroll_sens[1] = i32::from(data[8].max(1));
+        self.sniper_sens[1] = i32::from(data[9].max(1));
+        self.text_sens[1] = i32::from(data[10].max(1));
+        self.flags = data[11];
+        self.auto_flags = data[12];
+        self.module_select = data[25] & 0x0f;
+        self.axis_flags = data[26] & 0x0f;
+        self.auto_layer_timeout_index = (data[26] >> 4).min(5);
+    }
+
+    fn module_enabled(&self, source: QubePointingSource) -> bool {
+        let shift = if source.side == 0 { 0 } else { 2 };
+        let selected = (self.module_select >> shift) & 0x03;
+        matches!(
+            (selected, source.kind),
+            (QUBE_MODULE_SELECT_BALL, QubePointingKind::Ball)
+                | (QUBE_MODULE_SELECT_TOUCH, QubePointingKind::Touch)
+        )
+    }
+
+    fn orientation(&self, source: QubePointingSource) -> u8 {
+        match (source.side, source.kind) {
+            (0, QubePointingKind::Ball) => self.ball_axis[0],
+            (1, QubePointingKind::Ball) => self.ball_axis[1],
+            (0, QubePointingKind::Touch) => self.touch_axis[0],
+            _ => self.touch_axis[1],
+        }
+    }
+
+    fn sens(&self, side: usize, mode: QubePointingMode) -> i32 {
+        match mode {
+            QubePointingMode::Normal => 1,
+            QubePointingMode::Sniper => self.sniper_sens[side],
+            QubePointingMode::Scroll => self.scroll_sens[side],
+            QubePointingMode::Text => self.text_sens[side],
+        }
+        .max(1)
+    }
+
+    fn auto_layer_enabled(&self, mode: QubePointingMode) -> bool {
+        let bit = match mode {
+            QubePointingMode::Normal => 0,
+            QubePointingMode::Sniper => 1,
+            QubePointingMode::Scroll => 2,
+            QubePointingMode::Text => 3,
+        };
+        (self.auto_flags & (1 << bit)) != 0
+    }
+
+    fn auto_layer_timeout_ms(&self) -> u32 {
+        QUBE_AUTO_LAYER_TIMEOUT_MS_TABLE[usize::from(self.auto_layer_timeout_index.min(5))]
+    }
+
+    fn acceleration(&self, side: usize) -> bool {
+        self.flag(if side == 0 {
+            QUBE_FLAG_LEFT_ACCELERATION
+        } else {
+            QUBE_FLAG_RIGHT_ACCELERATION
+        })
+    }
+
+    fn sticky_mode(&self, side: usize) -> bool {
+        self.flag(if side == 0 {
+            QUBE_FLAG_LEFT_STICKY
+        } else {
+            QUBE_FLAG_RIGHT_STICKY
+        })
+    }
+
+    fn invert_scroll_x(&self, side: usize) -> bool {
+        self.axis_flag(if side == 0 {
+            QUBE_AXIS_FLAG_LEFT_INVERT_SCROLL_X
+        } else {
+            QUBE_AXIS_FLAG_RIGHT_INVERT_SCROLL_X
+        })
+    }
+
+    fn invert_scroll_y(&self, side: usize) -> bool {
+        self.flag(if side == 0 {
+            QUBE_FLAG_LEFT_INVERT_SCROLL_Y
+        } else {
+            QUBE_FLAG_RIGHT_INVERT_SCROLL_Y
+        })
+    }
+
+    fn invert_text_x(&self, side: usize) -> bool {
+        self.axis_flag(if side == 0 {
+            QUBE_AXIS_FLAG_LEFT_INVERT_TEXT_X
+        } else {
+            QUBE_AXIS_FLAG_RIGHT_INVERT_TEXT_X
+        })
+    }
+
+    fn invert_text_y(&self, side: usize) -> bool {
+        self.flag(if side == 0 {
+            QUBE_FLAG_LEFT_INVERT_TEXT_Y
+        } else {
+            QUBE_FLAG_RIGHT_INVERT_TEXT_Y
+        })
+    }
+
+    fn flag(&self, mask: u8) -> bool {
+        (self.flags & mask) != 0
+    }
+
+    fn axis_flag(&self, mask: u8) -> bool {
+        (self.axis_flags & mask) != 0
+    }
+}
+
+#[derive(Clone, Copy)]
+struct QubePointingSideState {
+    mode_override: Option<QubePointingMode>,
+    mode_key_prev_override: Option<QubePointingMode>,
+    mode_key_pressed_at_ms: u32,
+    remainder_x: i32,
+    remainder_y: i32,
+    text_last_motion_ms: u32,
+}
+
+impl QubePointingSideState {
+    const fn new() -> Self {
+        Self {
+            mode_override: None,
+            mode_key_prev_override: None,
+            mode_key_pressed_at_ms: 0,
+            remainder_x: 0,
+            remainder_y: 0,
+            text_last_motion_ms: 0,
+        }
+    }
+
+    fn reset_accum(&mut self) {
+        self.remainder_x = 0;
+        self.remainder_y = 0;
+    }
+}
+
+/// K:04 Qube central pointing processor.
+///
+/// Qube receives standard `PointingEvent`s from the halves over the existing
+/// split path, then applies the K:04 pointing mode user keys on the central.
+#[cfg(feature = "split")]
+#[processor(
+    subscribe = [PointingEvent, ActionEvent, KeyboardEvent, PeripheralSettingsEvent],
+    poll_interval = 50
+)]
+pub struct QubePointingModeProcessor<'a> {
+    keymap: &'a KeyMap<'a>,
+    sides: [QubePointingSideState; 2],
+    settings: QubePointingSettings,
+    active_auto_layer: u8,
+    auto_layer_held_keys: u8,
+    last_auto_motion_ms: u32,
+}
+
+#[cfg(feature = "split")]
+impl<'a> QubePointingModeProcessor<'a> {
+    pub fn new(keymap: &'a KeyMap<'a>) -> Self {
+        Self {
+            keymap,
+            sides: [QubePointingSideState::new(), QubePointingSideState::new()],
+            settings: QubePointingSettings::new(),
+            active_auto_layer: QUBE_AUTO_LAYER_NONE,
+            auto_layer_held_keys: 0,
+            last_auto_motion_ms: 0,
+        }
+    }
+
+    async fn on_peripheral_settings_event(&mut self, event: PeripheralSettingsEvent) {
+        self.settings.apply_packet(&event.0);
+        if self.active_auto_layer != QUBE_AUTO_LAYER_NONE
+            && !self
+                .settings
+                .auto_layer_enabled(self.mode_for_side(0))
+            && !self
+                .settings
+                .auto_layer_enabled(self.mode_for_side(1))
+        {
+            self.deactivate_auto_layer();
+        }
+    }
+
+    async fn on_keyboard_event(&mut self, event: KeyboardEvent) {
+        if self.active_auto_layer == QUBE_AUTO_LAYER_NONE {
+            return;
+        }
+        if event.pressed {
+            self.auto_layer_held_keys = self.auto_layer_held_keys.saturating_add(1);
+        } else {
+            self.auto_layer_held_keys = self.auto_layer_held_keys.saturating_sub(1);
+            self.last_auto_motion_ms = now_ms_u32();
+        }
+    }
+
+    async fn on_action_event(&mut self, event: ActionEvent) {
+        let Action::User(id) = event.action else {
+            return;
+        };
+
+        let pressed = event.keyboard_event.pressed;
+        match id {
+            QUBE_USER_SNIPER => self.handle_mode_key([true, true], QubePointingMode::Sniper, pressed),
+            QUBE_USER_SCROLL => self.handle_mode_key([true, true], QubePointingMode::Scroll, pressed),
+            QUBE_USER_TEXT => self.handle_mode_key([true, true], QubePointingMode::Text, pressed),
+            QUBE_USER_LEFT_SNIPER => self.handle_mode_key([true, false], QubePointingMode::Sniper, pressed),
+            QUBE_USER_LEFT_SCROLL => self.handle_mode_key([true, false], QubePointingMode::Scroll, pressed),
+            QUBE_USER_LEFT_TEXT => self.handle_mode_key([true, false], QubePointingMode::Text, pressed),
+            QUBE_USER_RIGHT_SNIPER => self.handle_mode_key([false, true], QubePointingMode::Sniper, pressed),
+            QUBE_USER_RIGHT_SCROLL => self.handle_mode_key([false, true], QubePointingMode::Scroll, pressed),
+            QUBE_USER_RIGHT_TEXT => self.handle_mode_key([false, true], QubePointingMode::Text, pressed),
+            _ => {}
+        }
+    }
+
+    async fn on_pointing_event(&mut self, event: PointingEvent) {
+        let Some(source) = qube_pointing_source(event.device_id) else {
+            return;
+        };
+        if !self.settings.module_enabled(source) {
+            return;
+        }
+
+        let mut x = 0i16;
+        let mut y = 0i16;
+        let mut wheel = 0i16;
+        let mut pan = 0i16;
+
+        for axis_event in event.axes.iter() {
+            match axis_event.axis {
+                Axis::X => x = axis_event.value,
+                Axis::Y => y = axis_event.value,
+                Axis::V => wheel = axis_event.value,
+                Axis::H => pan = axis_event.value,
+                _ => {}
+            }
+        }
+
+        if wheel != 0 || pan != 0 {
+            self.send_mouse(0, 0, 0, wheel, pan).await;
+            return;
+        }
+        if x == 0 && y == 0 {
+            return;
+        }
+
+        let (mut x, mut y) = rotate_motion(x, y, self.settings.orientation(source));
+        let mode = self.mode_for_side(source.side);
+        let buttons = self.keymap.mouse_buttons();
+        let is_touch_drag = source.kind == QubePointingKind::Touch && buttons != 0;
+
+        if !is_touch_drag {
+            self.sync_auto_layer_for_motion(mode);
+        }
+        if self.settings.acceleration(source.side) && !is_touch_drag {
+            x = accelerate_axis(x);
+            y = accelerate_axis(y);
+        }
+
+        let state = &mut self.sides[source.side];
+        if mode != QubePointingMode::Text && state.text_last_motion_ms != 0 {
+            state.text_last_motion_ms = 0;
+            state.reset_accum();
+        }
+
+        match mode {
+            QubePointingMode::Normal => send_mouse_report(buttons, 0, x, y, 0, 0).await,
+            QubePointingMode::Sniper => {
+                let divisor = self.settings.sens(source.side, QubePointingMode::Sniper);
+                let (x, y) = qube_divided_motion(state, x, y, divisor);
+                send_mouse_report(buttons, 0, x, y, 0, 0).await;
+            }
+            QubePointingMode::Scroll => {
+                let invert_x = if self.settings.invert_scroll_x(source.side) {
+                    -1
+                } else {
+                    1
+                };
+                let invert_y = if self.settings.invert_scroll_y(source.side) {
+                    -1
+                } else {
+                    1
+                };
+                let divisor = self.settings.sens(source.side, QubePointingMode::Scroll);
+                let (h, v) = qube_divided_motion(
+                    state,
+                    x.saturating_mul(invert_x),
+                    y.saturating_mul(invert_y),
+                    divisor,
+                );
+                send_mouse_report(buttons, 0, 0, 0, v, h).await;
+            }
+            QubePointingMode::Text => {
+                let invert_x = if self.settings.invert_text_x(source.side) {
+                    -1
+                } else {
+                    1
+                };
+                let invert_y = if self.settings.invert_text_y(source.side) {
+                    -1
+                } else {
+                    1
+                };
+                let divisor = self.settings.sens(source.side, QubePointingMode::Text);
+                qube_send_text_motion(
+                    state,
+                    x.saturating_mul(invert_x),
+                    y.saturating_mul(invert_y),
+                    divisor,
+                )
+                .await;
+            }
+        }
+    }
+
+    async fn poll(&mut self) {
+        if self.active_auto_layer == QUBE_AUTO_LAYER_NONE || self.auto_layer_held_keys != 0 {
+            return;
+        }
+        if now_ms_u32().wrapping_sub(self.last_auto_motion_ms)
+            >= self.settings.auto_layer_timeout_ms()
+        {
+            self.deactivate_auto_layer();
+        }
+    }
+
+    async fn send_mouse(&self, buttons: u8, x: i16, y: i16, wheel: i16, pan: i16) {
+        let buttons = self.keymap.mouse_buttons() | buttons;
+        send_mouse_report(buttons, 0, x, y, wheel, pan).await;
+    }
+
+    fn mode_for_side(&self, side: usize) -> QubePointingMode {
+        self.sides[side]
+            .mode_override
+            .unwrap_or(self.settings.mode[side])
+    }
+
+    fn handle_mode_key(&mut self, sides: [bool; 2], mode: QubePointingMode, pressed: bool) {
+        for (side, enabled) in sides.iter().copied().enumerate() {
+            if !enabled {
+                continue;
+            }
+            if pressed {
+                self.sides[side].mode_key_prev_override = self.sides[side].mode_override;
+                self.sides[side].mode_override = Some(mode);
+                self.sides[side].mode_key_pressed_at_ms = now_ms_u32();
+                self.sides[side].reset_accum();
+            } else {
+                let tapped = now_ms_u32()
+                    .wrapping_sub(self.sides[side].mode_key_pressed_at_ms)
+                    <= QUBE_MODE_KEY_TAP_MS;
+                self.sides[side].mode_override = self.sides[side].mode_key_prev_override;
+                if self.settings.sticky_mode(side) && tapped {
+                    if self.sides[side].mode_override == Some(mode) {
+                        self.sides[side].mode_override = None;
+                    } else {
+                        self.sides[side].mode_override = Some(mode);
+                    }
+                }
+                self.sides[side].reset_accum();
+            }
+        }
+    }
+
+    fn sync_auto_layer_for_motion(&mut self, mode: QubePointingMode) {
+        if !self.settings.auto_layer_enabled(mode) {
+            self.deactivate_auto_layer();
+            return;
+        }
+
+        let layer = self.settings.auto_layer;
+        if layer == 0 {
+            self.deactivate_auto_layer();
+            return;
+        }
+        self.last_auto_motion_ms = now_ms_u32();
+        if self.active_auto_layer == layer {
+            return;
+        }
+
+        self.deactivate_auto_layer();
+        self.active_auto_layer = layer;
+        self.auto_layer_held_keys = 0;
+        if layer != 0 {
+            self.keymap.activate_layer_if_inactive(layer);
+        }
+    }
+
+    fn deactivate_auto_layer(&mut self) {
+        let previous = self.active_auto_layer;
+        self.active_auto_layer = QUBE_AUTO_LAYER_NONE;
+        self.auto_layer_held_keys = 0;
+        if previous != QUBE_AUTO_LAYER_NONE && previous != 0 {
+            self.keymap.deactivate_layer_if_active(previous);
+        }
+    }
+}
+
+fn qube_pointing_source(device_id: u8) -> Option<QubePointingSource> {
+    match device_id {
+        0 => Some(QubePointingSource {
+            side: 0,
+            kind: QubePointingKind::Ball,
+        }),
+        1 => Some(QubePointingSource {
+            side: 1,
+            kind: QubePointingKind::Ball,
+        }),
+        2 => Some(QubePointingSource {
+            side: 0,
+            kind: QubePointingKind::Touch,
+        }),
+        3 => Some(QubePointingSource {
+            side: 1,
+            kind: QubePointingKind::Touch,
+        }),
+        _ => None,
+    }
+}
+
+fn qube_divided_motion(
+    state: &mut QubePointingSideState,
+    x: i16,
+    y: i16,
+    divisor: i32,
+) -> (i16, i16) {
+    let divisor = divisor.max(1);
+    state.remainder_x = state.remainder_x.saturating_add(x as i32);
+    state.remainder_y = state.remainder_y.saturating_add(y as i32);
+    let out_x = state.remainder_x / divisor;
+    let out_y = state.remainder_y / divisor;
+    state.remainder_x -= out_x * divisor;
+    state.remainder_y -= out_y * divisor;
+    (
+        out_x.clamp(i8::MIN as i32, i8::MAX as i32) as i16,
+        out_y.clamp(i8::MIN as i32, i8::MAX as i32) as i16,
+    )
+}
+
+async fn qube_send_text_motion(state: &mut QubePointingSideState, x: i16, y: i16, divisor: i32) {
+    let now = now_ms_u32();
+    if state.text_last_motion_ms != 0
+        && now.wrapping_sub(state.text_last_motion_ms) > QUBE_TEXT_AXIS_IDLE_MS
+    {
+        state.reset_accum();
+    }
+    state.text_last_motion_ms = now;
+
+    state.remainder_x = state.remainder_x.saturating_add(x as i32);
+    state.remainder_y = state.remainder_y.saturating_add(y as i32);
+
+    let key = if state.remainder_x.abs() >= state.remainder_y.abs()
+        && state.remainder_x.abs() >= divisor.saturating_mul(QUBE_TEXT_THRESHOLD)
+    {
+        let key = if state.remainder_x > 0 {
+            HidKeyCode::Right
+        } else {
+            HidKeyCode::Left
+        };
+        state.reset_accum();
+        Some(key)
+    } else if state.remainder_y.abs() >= divisor.saturating_mul(QUBE_TEXT_THRESHOLD) {
+        let key = if state.remainder_y > 0 {
+            HidKeyCode::Down
+        } else {
+            HidKeyCode::Up
+        };
+        state.reset_accum();
+        Some(key)
+    } else {
+        None
+    };
+
+    if let Some(key) = key {
+        tap_key(key).await;
+    }
+}
+
+fn rotate_motion(x: i16, y: i16, orientation: u8) -> (i16, i16) {
+    match orientation {
+        1 => (y, x.saturating_neg()),
+        2 => (x.saturating_neg(), y.saturating_neg()),
+        3 => (y.saturating_neg(), x),
+        _ => (x, y),
+    }
+}
+
+fn accelerate_axis(value: i16) -> i16 {
+    if value.unsigned_abs() > 10 {
+        value.saturating_mul(2)
+    } else {
+        value
+    }
+}
+
+fn now_ms_u32() -> u32 {
+    embassy_time::Instant::now().as_millis() as u32
+}
+
+async fn send_mouse_report(source_buttons: u8, buttons: u8, x: i16, y: i16, wheel: i16, pan: i16) {
+    let buttons = source_buttons | buttons;
+    if buttons == 0 && x == 0 && y == 0 && wheel == 0 && pan == 0 {
+        return;
+    }
+
+    send_hid_report(Report::MouseReport(MouseReport {
+        buttons,
+        x: x.clamp(i8::MIN as i16, i8::MAX as i16) as i8,
+        y: y.clamp(i8::MIN as i16, i8::MAX as i16) as i8,
+        wheel: wheel.clamp(i8::MIN as i16, i8::MAX as i16) as i8,
+        pan: pan.clamp(i8::MIN as i16, i8::MAX as i16) as i8,
+    }))
+    .await;
+}
+
 /// PointingProcessor that converts motion events to mouse reports
 #[processor(subscribe = [PointingEvent, PointingProcessorEvent])]
 pub struct PointingProcessor<'a> {
@@ -523,7 +1206,10 @@ impl<'a> PointingProcessor<'a> {
 
     /// Set the pointing mode
     pub fn set_pointing_mode(&mut self, mode: PointingMode) -> &mut Self {
-        self.current_mode = mode;
+        if self.current_mode != mode {
+            self.accumulator.reset();
+            self.current_mode = mode;
+        }
         self
     }
 

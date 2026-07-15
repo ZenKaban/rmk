@@ -43,7 +43,7 @@ for chip in chips:
                 print(chip, peripheral, interrupt)
                 chip_name = chip.replace(".json", "").lower()
                 if chip_name in results and peripheral == "USB_OTG_HS" and results[chip_name]['peripheral'] == "USB_OTG_FS":
-                    # Some chips have both `USB_OTG_HS` and `USB_OTG_FS`, we use `USB_OTG_FS` for now 
+                    # Some chips have both `USB_OTG_HS` and `USB_OTG_FS`, we use `USB_OTG_FS` for now
                     continue
                 results[chip_name] = {
                     "peripheral": peripheral,

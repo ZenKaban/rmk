@@ -43,7 +43,10 @@ static CONNECTION_TYPE_RESPONSE: Signal<crate::RawMutex, Option<ConnectionType>>
 static ACTIVE_BLE_PROFILE_RESPONSE: Signal<crate::RawMutex, Option<u8>> = Signal::new();
 
 #[cfg(feature = "_ble")]
-async fn request_read<T: Send>(msg: FlashOperationMessage, response: &Signal<crate::RawMutex, T>) -> T {
+async fn request_read<T: Send>(
+    msg: FlashOperationMessage,
+    response: &Signal<crate::RawMutex, T>,
+) -> T {
     response.reset();
     FLASH_CHANNEL.send(msg).await;
     response.wait().await
@@ -51,17 +54,29 @@ async fn request_read<T: Send>(msg: FlashOperationMessage, response: &Signal<cra
 
 #[cfg(feature = "_ble")]
 pub(crate) async fn read_bond_info(slot_num: u8) -> Option<ProfileInfo> {
-    request_read(FlashOperationMessage::ReadBleBondInfo(slot_num), &BOND_INFO_RESPONSE).await
+    request_read(
+        FlashOperationMessage::ReadBleBondInfo(slot_num),
+        &BOND_INFO_RESPONSE,
+    )
+    .await
 }
 
 #[cfg(all(feature = "_ble", feature = "split"))]
 pub(crate) async fn read_peer_address(peer_id: u8) -> Option<PeerAddress> {
-    request_read(FlashOperationMessage::ReadPeerAddress(peer_id), &PEER_ADDRESS_RESPONSE).await
+    request_read(
+        FlashOperationMessage::ReadPeerAddress(peer_id),
+        &PEER_ADDRESS_RESPONSE,
+    )
+    .await
 }
 
 #[cfg(feature = "_ble")]
 pub(crate) async fn read_connection_type() -> Option<ConnectionType> {
-    request_read(FlashOperationMessage::ReadConnectionType, &CONNECTION_TYPE_RESPONSE).await
+    request_read(
+        FlashOperationMessage::ReadConnectionType,
+        &CONNECTION_TYPE_RESPONSE,
+    )
+    .await
 }
 
 #[cfg(feature = "_ble")]
@@ -78,7 +93,9 @@ pub(crate) async fn read_active_ble_profile() -> Option<u8> {
 #[cfg(all(feature = "_ble", feature = "split"))]
 pub(crate) async fn write_peer_address(addr: PeerAddress) -> bool {
     FLASH_OPERATION_FINISHED.reset();
-    FLASH_CHANNEL.send(FlashOperationMessage::PeerAddress(addr)).await;
+    FLASH_CHANNEL
+        .send(FlashOperationMessage::PeerAddress(addr))
+        .await;
     FLASH_OPERATION_FINISHED.wait().await
 }
 
@@ -151,6 +168,9 @@ pub(crate) enum FlashOperationMessage {
     PriorIdleTime(u16),
     // Default morse profile containing all morse/tap-hold settings (mode, timeouts, unilateral_tap)
     MorseDefaultProfile(MorseProfile),
+    #[cfg(all(feature = "host", feature = "vial"))]
+    // Keyboard-specific Vial settings
+    DeviceSettings(config::VialDeviceSettingsData),
     #[cfg(feature = "_ble")]
     // Read bond info for the given slot; storage task replies via `BOND_INFO_RESPONSE`.
     ReadBleBondInfo(u8),
@@ -191,6 +211,8 @@ pub(crate) enum StorageKey {
     Fork(u8),
     #[cfg(feature = "host")]
     Morse(u8),
+    #[cfg(all(feature = "host", feature = "vial"))]
+    DeviceSettings,
     #[cfg(all(feature = "_ble", feature = "split"))]
     PeerAddress(u8),
     #[cfg(feature = "_ble")]
@@ -244,7 +266,8 @@ impl Key for StorageKey {
     }
 
     fn deserialize_from(buffer: &[u8]) -> Result<(Self, usize), SerializationError> {
-        let (key, rest): (Self, &[u8]) = postcard::take_from_bytes(buffer).map_err(SerializationError::from)?;
+        let (key, rest): (Self, &[u8]) =
+            postcard::take_from_bytes(buffer).map_err(SerializationError::from)?;
         Ok((key, buffer.len() - rest.len()))
     }
 
@@ -272,6 +295,8 @@ pub(crate) enum StorageData {
     Fork(Fork),
     #[cfg(feature = "host")]
     Morse(Morse),
+    #[cfg(all(feature = "host", feature = "vial"))]
+    DeviceSettings(config::VialDeviceSettingsData),
     #[cfg(all(feature = "_ble", feature = "split"))]
     PeerAddress(PeerAddress),
     #[cfg(feature = "_ble")]
@@ -387,8 +412,13 @@ macro_rules! update_storage_field {
     }};
 }
 
-impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_ENCODER: usize>
-    Storage<F, ROW, COL, NUM_LAYER, NUM_ENCODER>
+impl<
+    F: AsyncNorFlash,
+    const ROW: usize,
+    const COL: usize,
+    const NUM_LAYER: usize,
+    const NUM_ENCODER: usize,
+> Storage<F, ROW, COL, NUM_LAYER, NUM_ENCODER>
 {
     async fn fetch_data(&mut self, key: StorageKey) -> Option<StorageData> {
         match self.flash.fetch_item(&mut self.buffer, &key).await {
@@ -400,14 +430,20 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
         }
     }
 
-    async fn store_data(&mut self, key: StorageKey, data: &StorageData) -> Result<(), SSError<F::Error>> {
+    async fn store_data(
+        &mut self,
+        key: StorageKey,
+        data: &StorageData,
+    ) -> Result<(), SSError<F::Error>> {
         self.flash.store_item(&mut self.buffer, &key, data).await
     }
 
     pub async fn new(
         flash: F,
         #[cfg(feature = "host")] keymap: &[[[KeyAction; COL]; ROW]; NUM_LAYER],
-        #[cfg(feature = "host")] encoder_map: &Option<&mut [[EncoderAction; NUM_ENCODER]; NUM_LAYER]>,
+        #[cfg(feature = "host")] encoder_map: &Option<
+            &mut [[EncoderAction; NUM_ENCODER]; NUM_LAYER],
+        >,
         storage_config: &StorageConfig,
         behavior_config: &config::BehaviorConfig,
     ) -> Self {
@@ -423,14 +459,20 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
         // Otherwise, use storage config setting
         // When DFU is active the storage partition already sits at the correct
         // offset — the _nrf_ble special case (0x60000) only applies without DFU.
-        #[cfg(all(feature = "_nrf_ble", not(any(feature = "dfu_rp", feature = "dfu_nrf"))))]
+        #[cfg(all(
+            feature = "_nrf_ble",
+            not(any(feature = "dfu_rp", feature = "dfu_nrf"))
+        ))]
         let start_addr = if storage_config.start_addr == 0 {
             0x0006_0000
         } else {
             storage_config.start_addr
         };
 
-        #[cfg(not(all(feature = "_nrf_ble", not(any(feature = "dfu_rp", feature = "dfu_nrf")))))]
+        #[cfg(not(all(
+            feature = "_nrf_ble",
+            not(any(feature = "dfu_rp", feature = "dfu_nrf"))
+        )))]
         let start_addr = storage_config.start_addr;
         // Check storage setting
         info!(
@@ -442,13 +484,15 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
         );
 
         let storage_range = if start_addr == 0 {
-            (flash.capacity() - storage_config.num_sectors as usize * F::ERASE_SIZE) as u32..flash.capacity() as u32
+            (flash.capacity() - storage_config.num_sectors as usize * F::ERASE_SIZE) as u32
+                ..flash.capacity() as u32
         } else {
             assert!(
                 start_addr.is_multiple_of(F::ERASE_SIZE),
                 "Storage's start addr MUST BE a multiplier of sector size"
             );
-            start_addr as u32..(start_addr + storage_config.num_sectors as usize * F::ERASE_SIZE) as u32
+            start_addr as u32
+                ..(start_addr + storage_config.num_sectors as usize * F::ERASE_SIZE) as u32
         };
 
         let mut storage = Self {
@@ -491,7 +535,9 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
             {
                 debug!("clear_layout=true; overwriting layout items without erase.");
                 let encoder_map = encoder_map.as_ref().map(|m| &**m);
-                let _ = storage.reset_layout_only(keymap, &encoder_map, behavior_config).await;
+                let _ = storage
+                    .reset_layout_only(keymap, &encoder_map, behavior_config)
+                    .await;
             }
         }
 
@@ -521,10 +567,27 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
         Ok(())
     }
 
+    #[cfg(all(feature = "host", feature = "vial"))]
+    pub(crate) async fn read_device_settings(
+        &mut self,
+    ) -> Result<Option<config::VialDeviceSettingsData>, ()> {
+        match self
+            .flash
+            .fetch_item(&mut self.buffer, &StorageKey::DeviceSettings)
+            .await
+            .map_err(|e| print_storage_error::<F>(e))?
+        {
+            Some(StorageData::DeviceSettings(data)) => Ok(Some(data)),
+            _ => Ok(None),
+        }
+    }
+
     async fn initialize_storage_with_config(
         &mut self,
         #[cfg(feature = "host")] keymap: &[[[KeyAction; COL]; ROW]; NUM_LAYER],
-        #[cfg(feature = "host")] encoder_map: &Option<&mut [[EncoderAction; NUM_ENCODER]; NUM_LAYER]>,
+        #[cfg(feature = "host")] encoder_map: &Option<
+            &mut [[EncoderAction; NUM_ENCODER]; NUM_LAYER],
+        >,
         behavior: &config::BehaviorConfig,
     ) -> Result<(), ()> {
         // Save storage config
@@ -634,7 +697,8 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
     }
 
     async fn check_enable(&mut self) -> bool {
-        if let Some(StorageData::StorageConfig(config)) = self.fetch_data(StorageKey::StorageConfig).await
+        if let Some(StorageData::StorageConfig(config)) =
+            self.fetch_data(StorageKey::StorageConfig).await
             && config.enable
             && config.build_hash == BUILD_HASH
         {
@@ -652,7 +716,8 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
     pub async fn read_peripheral_addresses<const PERI_NUM: usize>(
         &mut self,
     ) -> core::cell::RefCell<heapless::Vec<Option<[u8; 6]>, PERI_NUM>> {
-        let mut peripheral_addresses: heapless::Vec<Option<[u8; 6]>, PERI_NUM> = heapless::Vec::new();
+        let mut peripheral_addresses: heapless::Vec<Option<[u8; 6]>, PERI_NUM> =
+            heapless::Vec::new();
         for id in 0..PERI_NUM {
             let entry = match self.fetch_data(StorageKey::peer_address(id as u8)).await {
                 Some(StorageData::PeerAddress(addr)) if addr.is_valid => Some(addr.address),
@@ -664,8 +729,13 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
     }
 }
 
-impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_ENCODER: usize>
-    crate::core_traits::Runnable for Storage<F, ROW, COL, NUM_LAYER, NUM_ENCODER>
+impl<
+    F: AsyncNorFlash,
+    const ROW: usize,
+    const COL: usize,
+    const NUM_LAYER: usize,
+    const NUM_ENCODER: usize,
+> crate::core_traits::Runnable for Storage<F, ROW, COL, NUM_LAYER, NUM_ENCODER>
 {
     async fn run(&mut self) -> ! {
         loop {
@@ -711,7 +781,12 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
                 }
 
                 FlashOperationMessage::LayoutOptions(layout_option) => {
-                    update_storage_field!(&mut self.flash, &mut self.buffer, LayoutConfig, layout_option)
+                    update_storage_field!(
+                        &mut self.flash,
+                        &mut self.buffer,
+                        LayoutConfig,
+                        layout_option
+                    )
                 }
                 FlashOperationMessage::Reset => self.flash.erase_all().await,
                 FlashOperationMessage::ResetLayout => {
@@ -719,7 +794,12 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
                     Ok(())
                 }
                 FlashOperationMessage::DefaultLayer(default_layer) => {
-                    update_storage_field!(&mut self.flash, &mut self.buffer, LayoutConfig, default_layer)
+                    update_storage_field!(
+                        &mut self.flash,
+                        &mut self.buffer,
+                        LayoutConfig,
+                        default_layer
+                    )
                 }
                 #[cfg(feature = "host")]
                 FlashOperationMessage::MacroData(data) => {
@@ -733,13 +813,19 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
                     col,
                     action,
                 } => {
-                    self.store_data(StorageKey::keymap(layer, row, col), &StorageData::KeyAction(action))
-                        .await
+                    self.store_data(
+                        StorageKey::keymap(layer, row, col),
+                        &StorageData::KeyAction(action),
+                    )
+                    .await
                 }
                 #[cfg(feature = "host")]
                 FlashOperationMessage::Encoder { layer, idx, action } => {
-                    self.store_data(StorageKey::encoder(idx, layer), &StorageData::EncoderAction(action))
-                        .await
+                    self.store_data(
+                        StorageKey::encoder(idx, layer),
+                        &StorageData::EncoderAction(action),
+                    )
+                    .await
                 }
                 #[cfg(feature = "host")]
                 FlashOperationMessage::Combo { idx, config } => {
@@ -748,12 +834,21 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
                 }
                 #[cfg(feature = "host")]
                 FlashOperationMessage::Fork { idx, fork } => {
-                    self.store_data(StorageKey::fork(idx), &StorageData::Fork(fork)).await
+                    self.store_data(StorageKey::fork(idx), &StorageData::Fork(fork))
+                        .await
                 }
                 #[cfg(feature = "host")]
                 FlashOperationMessage::Morse { idx, morse } => {
                     self.store_data(StorageKey::morse(idx), &StorageData::Morse(morse))
                         .await
+                }
+                #[cfg(all(feature = "host", feature = "vial"))]
+                FlashOperationMessage::DeviceSettings(data) => {
+                    self.store_data(
+                        StorageKey::DeviceSettings,
+                        &StorageData::DeviceSettings(data),
+                    )
+                    .await
                 }
                 FlashOperationMessage::ConnectionType(ty) => {
                     self.store_data(StorageKey::ConnectionType, &StorageData::ConnectionType(ty))
@@ -761,13 +856,19 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
                 }
                 #[cfg(all(feature = "_ble", feature = "split"))]
                 FlashOperationMessage::PeerAddress(peer) => {
-                    self.store_data(StorageKey::peer_address(peer.peer_id), &StorageData::PeerAddress(peer))
-                        .await
+                    self.store_data(
+                        StorageKey::peer_address(peer.peer_id),
+                        &StorageData::PeerAddress(peer),
+                    )
+                    .await
                 }
                 #[cfg(feature = "_ble")]
                 FlashOperationMessage::ActiveBleProfile(profile) => {
-                    self.store_data(StorageKey::ActiveBleProfile, &StorageData::ActiveBleProfile(profile))
-                        .await
+                    self.store_data(
+                        StorageKey::ActiveBleProfile,
+                        &StorageData::ActiveBleProfile(profile),
+                    )
+                    .await
                 }
                 #[cfg(feature = "_ble")]
                 FlashOperationMessage::ClearSlot(slot_num) => {
@@ -790,8 +891,11 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
                         ),
                         cccd_table: heapless::Vec::new(),
                     };
-                    self.store_data(StorageKey::bond_info(slot_num), &StorageData::BondInfo(empty))
-                        .await
+                    self.store_data(
+                        StorageKey::bond_info(slot_num),
+                        &StorageData::BondInfo(empty),
+                    )
+                    .await
                 }
                 #[cfg(feature = "_ble")]
                 FlashOperationMessage::ProfileInfo(b) => {
@@ -800,22 +904,52 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
                         .await
                 }
                 FlashOperationMessage::ComboTimeout(combo_timeout) => {
-                    update_storage_field!(&mut self.flash, &mut self.buffer, BehaviorConfig, combo_timeout)
+                    update_storage_field!(
+                        &mut self.flash,
+                        &mut self.buffer,
+                        BehaviorConfig,
+                        combo_timeout
+                    )
                 }
                 FlashOperationMessage::OneShotTimeout(one_shot_timeout) => {
-                    update_storage_field!(&mut self.flash, &mut self.buffer, BehaviorConfig, one_shot_timeout)
+                    update_storage_field!(
+                        &mut self.flash,
+                        &mut self.buffer,
+                        BehaviorConfig,
+                        one_shot_timeout
+                    )
                 }
                 FlashOperationMessage::TapInterval(tap_interval) => {
-                    update_storage_field!(&mut self.flash, &mut self.buffer, BehaviorConfig, tap_interval)
+                    update_storage_field!(
+                        &mut self.flash,
+                        &mut self.buffer,
+                        BehaviorConfig,
+                        tap_interval
+                    )
                 }
                 FlashOperationMessage::TapCapslockInterval(tap_capslock_interval) => {
-                    update_storage_field!(&mut self.flash, &mut self.buffer, BehaviorConfig, tap_capslock_interval)
+                    update_storage_field!(
+                        &mut self.flash,
+                        &mut self.buffer,
+                        BehaviorConfig,
+                        tap_capslock_interval
+                    )
                 }
                 FlashOperationMessage::PriorIdleTime(prior_idle_time) => {
-                    update_storage_field!(&mut self.flash, &mut self.buffer, BehaviorConfig, prior_idle_time)
+                    update_storage_field!(
+                        &mut self.flash,
+                        &mut self.buffer,
+                        BehaviorConfig,
+                        prior_idle_time
+                    )
                 }
                 FlashOperationMessage::MorseDefaultProfile(morse_default_profile) => {
-                    update_storage_field!(&mut self.flash, &mut self.buffer, BehaviorConfig, morse_default_profile)
+                    update_storage_field!(
+                        &mut self.flash,
+                        &mut self.buffer,
+                        BehaviorConfig,
+                        morse_default_profile
+                    )
                 }
             };
 
@@ -872,7 +1006,9 @@ mod tests {
     use sequential_storage::map::{MapConfig, MapStorage};
 
     use super::*;
-    use crate::config::{BehaviorConfig as RuntimeBehaviorConfig, StorageConfig as RuntimeStorageConfig};
+    use crate::config::{
+        BehaviorConfig as RuntimeBehaviorConfig, StorageConfig as RuntimeStorageConfig,
+    };
     use crate::test_support::test_block_on as block_on;
 
     #[derive(Debug, Clone, Copy)]
@@ -888,20 +1024,24 @@ mod tests {
         bytes: [u8; SIZE],
     }
 
-    impl<const SIZE: usize, const ERASE_SIZE: usize, const WRITE_SIZE: usize> TestFlash<SIZE, ERASE_SIZE, WRITE_SIZE> {
+    impl<const SIZE: usize, const ERASE_SIZE: usize, const WRITE_SIZE: usize>
+        TestFlash<SIZE, ERASE_SIZE, WRITE_SIZE>
+    {
         fn new() -> Self {
-            Self { bytes: [0xFF; SIZE] }
+            Self {
+                bytes: [0xFF; SIZE],
+            }
         }
     }
 
-    impl<const SIZE: usize, const ERASE_SIZE: usize, const WRITE_SIZE: usize> embedded_storage::nor_flash::ErrorType
-        for TestFlash<SIZE, ERASE_SIZE, WRITE_SIZE>
+    impl<const SIZE: usize, const ERASE_SIZE: usize, const WRITE_SIZE: usize>
+        embedded_storage::nor_flash::ErrorType for TestFlash<SIZE, ERASE_SIZE, WRITE_SIZE>
     {
         type Error = TestFlashError;
     }
 
-    impl<const SIZE: usize, const ERASE_SIZE: usize, const WRITE_SIZE: usize> embedded_storage::nor_flash::ReadNorFlash
-        for TestFlash<SIZE, ERASE_SIZE, WRITE_SIZE>
+    impl<const SIZE: usize, const ERASE_SIZE: usize, const WRITE_SIZE: usize>
+        embedded_storage::nor_flash::ReadNorFlash for TestFlash<SIZE, ERASE_SIZE, WRITE_SIZE>
     {
         const READ_SIZE: usize = 1;
 
@@ -917,8 +1057,8 @@ mod tests {
         }
     }
 
-    impl<const SIZE: usize, const ERASE_SIZE: usize, const WRITE_SIZE: usize> embedded_storage::nor_flash::NorFlash
-        for TestFlash<SIZE, ERASE_SIZE, WRITE_SIZE>
+    impl<const SIZE: usize, const ERASE_SIZE: usize, const WRITE_SIZE: usize>
+        embedded_storage::nor_flash::NorFlash for TestFlash<SIZE, ERASE_SIZE, WRITE_SIZE>
     {
         const WRITE_SIZE: usize = WRITE_SIZE;
         const ERASE_SIZE: usize = ERASE_SIZE;
@@ -939,7 +1079,8 @@ mod tests {
     }
 
     impl<const SIZE: usize, const ERASE_SIZE: usize, const WRITE_SIZE: usize>
-        embedded_storage_async::nor_flash::ReadNorFlash for TestFlash<SIZE, ERASE_SIZE, WRITE_SIZE>
+        embedded_storage_async::nor_flash::ReadNorFlash
+        for TestFlash<SIZE, ERASE_SIZE, WRITE_SIZE>
     {
         const READ_SIZE: usize = 1;
 
@@ -1013,8 +1154,11 @@ mod tests {
             type Flash = TestFlash<16_384, 4_096, 1>;
 
             let storage_range = (16_384 - 2 * 4_096) as u32..16_384u32;
-            let mut map =
-                MapStorage::<StorageKey, _, _>::new(Flash::new(), MapConfig::new(storage_range), NoCache::new());
+            let mut map = MapStorage::<StorageKey, _, _>::new(
+                Flash::new(),
+                MapConfig::new(storage_range),
+                NoCache::new(),
+            );
             let mut buffer = [0u8; 256];
 
             map.store_item(

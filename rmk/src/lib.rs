@@ -74,6 +74,7 @@ pub mod helper_macro;
 pub mod hid;
 #[cfg(feature = "host")]
 pub mod host;
+pub mod host_data;
 pub mod input_device;
 pub mod keyboard;
 pub mod keyboard_macros;
@@ -127,19 +128,37 @@ pub async fn initialize_keymap_and_storage<
     storage_config: &config::StorageConfig,
     behavior_config: &'a mut config::BehaviorConfig,
     positional_config: &'a PositionalConfig<ROW, COL>,
+    #[cfg(feature = "vial")] vial_config: Option<&config::VialConfig<'static>>,
 ) -> (KeyMap<'a>, Storage<F, ROW, COL, NUM_LAYER, NUM_ENCODER>) {
     #[cfg(feature = "host")]
     {
         let mut storage = {
-            let encoder_opt: Option<&mut [[EncoderAction; NUM_ENCODER]; NUM_LAYER]> = if NUM_ENCODER > 0 {
-                Some(&mut data.encoder_map)
-            } else {
-                None
-            };
-            Storage::new(flash, &data.keymap, &encoder_opt, storage_config, behavior_config).await
+            let encoder_opt: Option<&mut [[EncoderAction; NUM_ENCODER]; NUM_LAYER]> =
+                if NUM_ENCODER > 0 {
+                    Some(&mut data.encoder_map)
+                } else {
+                    None
+                };
+            Storage::new(
+                flash,
+                &data.keymap,
+                &encoder_opt,
+                storage_config,
+                behavior_config,
+            )
+            .await
         };
+        #[cfg(feature = "vial")]
+        if let Some(vial_config) = vial_config
+            && let Some(device_settings) = vial_config.device_settings
+            && let Ok(Some(data)) = storage.read_device_settings().await
+        {
+            (device_settings.deserialize)(&data.data[..data.len as usize]);
+        }
 
-        let keymap = KeyMap::new_from_storage(data, Some(&mut storage), behavior_config, positional_config).await;
+        let keymap =
+            KeyMap::new_from_storage(data, Some(&mut storage), behavior_config, positional_config)
+                .await;
         (keymap, storage)
     }
 

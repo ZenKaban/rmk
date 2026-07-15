@@ -77,11 +77,14 @@ impl<const ROW: usize, const COL: usize, const ROW_OFFSET: usize, const COL_OFFS
 
         let mut indicator_sub = crate::event::LedIndicatorEvent::subscriber();
         let mut layer_sub = crate::event::LayerChangeEvent::subscriber();
+        let mut settings_sub = crate::event::PeripheralSettingsEvent::subscriber();
         // Subscribe before the initial send so any change racing past the
         // snapshot is still delivered to us.
         let mut connection_sub = crate::event::ConnectionStatusChangeEvent::subscriber();
         #[cfg(feature = "_ble")]
         let mut clear_peer_sub = crate::event::ClearPeerEvent::subscriber();
+        #[cfg(feature = "_ble")]
+        let mut battery_refresh_sub = crate::event::PeripheralBatteryRefreshEvent::subscriber();
 
         #[cfg(feature = "display")]
         let mut wpm_sub = crate::event::WpmUpdateEvent::subscriber();
@@ -108,6 +111,7 @@ impl<const ROW: usize, const COL: usize, const ROW_OFFSET: usize, const COL_OFFS
                 crate::select_biased_with_feature! {
                     e = indicator_sub.next_event().fuse() => SplitMessage::KeyboardIndicator(e.0.into_bits()),
                     e = layer_sub.next_event().fuse() => SplitMessage::Layer(e.0),
+                    e = settings_sub.next_event().fuse() => SplitMessage::PeripheralSettings(e.0),
                     e = connection_sub.next_event().fuse() => SplitMessage::ConnectionStatus(e.0),
                     with_feature("_ble"): _ = clear_peer_sub.next_event().fuse() => {
                         #[cfg(feature = "storage")]
@@ -123,14 +127,23 @@ impl<const ROW: usize, const COL: usize, const ROW_OFFSET: usize, const COL_OFFS
                         }
                         SplitMessage::ClearPeer
                     },
+                    with_feature("_ble"): _ = battery_refresh_sub.next_event().fuse() => {
+                        SplitMessage::BatteryRefresh
+                    },
                     with_feature("display"): e = wpm_sub.next_event().fuse() => SplitMessage::Wpm(e.0),
                     with_feature("display"): e = modifier_sub.next_event().fuse() => SplitMessage::Modifier(e.modifier.into_bits()),
                     with_feature("display"): e = sleep_sub.next_event().fuse() => SplitMessage::SleepState(e.0),
                 }
             };
 
-            match select(self.transceiver.read(), next_event_to_peri).await {
-                Either::First(read_result) => match read_result {
+            // Keep state updates responsive when peripherals stream pointing reports.
+            match select(next_event_to_peri, self.transceiver.read()).await {
+                Either::First(msg) => {
+                    if self.send(&msg).await.is_err() {
+                        return;
+                    }
+                }
+                Either::Second(read_result) => match read_result {
                     Ok(split_message) => {
                         self.process_peripheral_message(split_message).await;
                     }
@@ -138,11 +151,6 @@ impl<const ROW: usize, const COL: usize, const ROW_OFFSET: usize, const COL_OFFS
                         error!("Peripheral message read error: {:?}", e);
                     }
                 },
-                Either::Second(msg) => {
-                    if self.send(&msg).await.is_err() {
-                        return;
-                    }
-                }
             }
         }
     }
@@ -176,6 +184,7 @@ impl<const ROW: usize, const COL: usize, const ROW_OFFSET: usize, const COL_OFFS
             #[cfg(feature = "_ble")]
             SplitMessage::BatteryStatus(state) => {
                 use crate::event::PeripheralBatteryEvent;
+                crate::split::battery::update_peripheral_battery_status(self.id, state.0);
                 publish_event(PeripheralBatteryEvent { id: self.id, state })
             }
             _ => warn!("{:?} should not come from peripheral", split_message),

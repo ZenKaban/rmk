@@ -10,6 +10,11 @@ chip = "nrf52840"
 vial_enabled = true
 unlock_keys = [[0, 4], [0, 3]]
 
+[event]
+action.channel_size = 16
+action.subs = 1
+keyboard.subs = 4
+
 [layout]
 rows = 6
 cols = 6
@@ -62,10 +67,6 @@ _     F9  F10 F11 F12  OutputUsb  MediaPrevTrack  MediaPlayPause  MediaNextTrack
 
 [ble]
 enabled = true
-# Battery ADC: P0_31 (AIN7), voltage divider 1564k/(806k+1564k)
-battery_adc_pin = "P0_31"
-adc_divider_measured = 782
-adc_divider_total = 1185
 
 [split]
 connection = "ble"
@@ -92,6 +93,7 @@ col_pins = ["P0_30", "P0_29", "P0_02", "P1_13", "P0_28", "P0_03"]
 
 [rmk]
 split_peripherals_num = 1
+split_central_sleep_timeout_seconds = 120
 combo_max_num = 32
 morse_max_num = 32
 macro_space_size = 2048

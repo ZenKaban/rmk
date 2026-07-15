@@ -6,5 +6,7 @@
 pub mod battery_led;
 #[cfg(feature = "dfu")]
 pub mod dfu_led;
+#[cfg(feature = "_ble")]
+pub mod ergohaven;
 pub mod led_indicator;
 pub mod wpm;

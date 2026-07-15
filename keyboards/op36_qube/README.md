@@ -6,8 +6,8 @@ This target is intentionally separate from `keyboards/op36`:
 
 - `qube` is the USB HID central/dongle with the ST7789 display.
 - `left` and `right` are BLE peripherals with ids `0` and `1`.
-- RMK comes from `../../common/rmk-main-upstream`, vendored from official
-  upstream `https://github.com/HaoboGu/rmk` main.
+- RMK comes from the root workspace crates (`../../rmk`, `../../rmk-types`),
+  synced from official upstream `https://github.com/HaoboGu/rmk` main.
 
 ## Build
 

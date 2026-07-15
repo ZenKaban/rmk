@@ -10,6 +10,11 @@ chip = "nrf52840"
 vial_enabled = true
 unlock_keys = [[0, 5], [0, 4]]
 
+[event]
+action.channel_size = 16
+action.subs = 1
+keyboard.subs = 4
+
 [layout]
 rows = 8
 cols = 6
@@ -73,9 +78,6 @@ encoders = [["AudioVolUp","AudioVolDown"],["AudioVolUp","AudioVolDown"]]
 
 [ble]
 enabled = true
-battery_adc_pin = "P0_31"
-adc_divider_measured = 782
-adc_divider_total = 1185
 
 [split]
 connection = "ble"
@@ -118,6 +120,7 @@ internal_pullup = true
 
 [rmk]
 split_peripherals_num = 1
+split_central_sleep_timeout_seconds = 120
 combo_max_num = 32
 morse_max_num = 32
 macro_space_size = 2048

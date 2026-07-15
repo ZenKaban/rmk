@@ -49,7 +49,7 @@ fn active_report_channel() -> Option<(ConnectionType, &'static ReportChannel)> {
 }
 
 /// Reports generated while no transport is selected are dropped on the floor.
-pub(crate) async fn send_hid_report(mut report: Report) {
+pub async fn send_hid_report(mut report: Report) {
     let Some((transport, ch)) = active_report_channel() else {
         return;
     };

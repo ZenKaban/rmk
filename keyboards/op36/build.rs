@@ -6,8 +6,13 @@ use std::{env, fs};
 use xz2::read::XzEncoder;
 
 fn main() {
+    const FIRMWARE_VERSION: &str = "0.1.2";
+    const FIRMWARE_VERSION_BCD: &str = "0x0102";
+
     println!("cargo:rerun-if-changed=vial.json");
     println!("cargo:rerun-if-changed=keyboard.toml");
+    println!("cargo:rustc-env=RMK_FIRMWARE_VERSION={FIRMWARE_VERSION}");
+    println!("cargo:rustc-env=RMK_FIRMWARE_VERSION_BCD={FIRMWARE_VERSION_BCD}");
 
     generate_vial_config();
 
@@ -32,8 +37,7 @@ fn generate_vial_config() {
     let mut content = String::new();
     match File::open(p) {
         Ok(mut file) => {
-            file.read_to_string(&mut content)
-                .expect("Cannot read vial.json");
+            file.read_to_string(&mut content).expect("Cannot read vial.json");
         }
         Err(e) => println!("Cannot find vial.json {:?}: {}", p, e),
     };

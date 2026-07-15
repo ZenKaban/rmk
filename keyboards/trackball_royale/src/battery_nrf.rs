@@ -1,0 +1,90 @@
+//! Trackball battery reader for AIN7/P0_31, 1564k/2370k divider.
+
+use embassy_nrf::interrupt;
+use embassy_nrf::interrupt::InterruptExt;
+use embassy_nrf::peripherals::{P0_31, SAADC};
+use embassy_nrf::saadc::{self, Input as _, Saadc};
+use embassy_nrf::{bind_interrupts, Peri};
+use embassy_time::{with_timeout, Duration, Timer};
+use rmk::core_traits::Runnable;
+use rmk::event::{publish_event, BatteryStatusEvent, EventSubscriber};
+use rmk::processor::Processor;
+use rmk::types::battery::{BatteryStatus, ChargeState};
+
+bind_interrupts!(struct SaadcIrqs {
+    SAADC => saadc::InterruptHandler;
+});
+
+const MEASURED: i32 = 1564;
+const TOTAL: i32 = 2370;
+
+fn percent(val: u16) -> u8 {
+    let val = val as i32;
+    if val > 4755 * MEASURED / TOTAL {
+        100
+    } else if val < 4055 * MEASURED / TOTAL {
+        0
+    } else {
+        ((val * TOTAL / MEASURED - 4055) / 7) as u8
+    }
+}
+
+pub struct TrackballBattery {
+    saadc: Saadc<'static, 1>,
+}
+
+impl TrackballBattery {
+    pub fn new(saadc: Peri<'static, SAADC>, pin: Peri<'static, P0_31>) -> Self {
+        interrupt::SAADC.set_priority(interrupt::Priority::P3);
+        let channel = saadc::ChannelConfig::single_ended(pin.degrade_saadc());
+        Self {
+            saadc: Saadc::new(saadc, SaadcIrqs, saadc::Config::default(), [channel]),
+        }
+    }
+
+    async fn publish_sample(&mut self) {
+        let mut buf = [0i16; 1];
+        let level = match with_timeout(Duration::from_millis(200), self.saadc.sample(&mut buf)).await {
+            Ok(()) => {
+                let raw = if buf[0] < 0 { 0 } else { buf[0] as u16 };
+                percent(raw)
+            }
+            Err(_) => 0,
+        };
+        publish_event(BatteryStatusEvent(BatteryStatus::Available {
+            charge_state: ChargeState::Unknown,
+            level: Some(level),
+        }));
+    }
+}
+
+struct NeverSub;
+pub struct NeverEvent;
+
+impl EventSubscriber for NeverSub {
+    type Event = NeverEvent;
+    async fn next_event(&mut self) -> NeverEvent {
+        core::future::pending().await
+    }
+}
+
+impl Runnable for TrackballBattery {
+    async fn run(&mut self) -> ! {
+        Timer::after(Duration::from_millis(1000)).await;
+        loop {
+            self.publish_sample().await;
+            Timer::after(Duration::from_secs(2)).await;
+        }
+    }
+}
+
+impl Processor for TrackballBattery {
+    type Event = NeverEvent;
+    fn subscriber() -> impl EventSubscriber<Event = NeverEvent> {
+        NeverSub
+    }
+    async fn process(&mut self, _: NeverEvent) {}
+    async fn process_loop(&mut self) -> ! {
+        self.run().await
+    }
+}

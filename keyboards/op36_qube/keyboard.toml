@@ -13,6 +13,7 @@ unlock_keys = [[0, 4], [0, 3]]
 
 [rmk]
 split_peripherals_num = 2
+split_central_sleep_timeout_seconds = 120
 combo_max_num = 32
 morse_max_num = 32
 macro_space_size = 2048
@@ -29,6 +30,9 @@ enabled = true
 clear_storage = false
 
 [event]
+action.channel_size = 16
+action.subs = 1
+keyboard.subs = 4
 peripheral_battery.pubs = 2
 peripheral_battery.subs = 4
 # Dongle UI + 2 peripheral sync consumers; avoid dropped layer/mod updates

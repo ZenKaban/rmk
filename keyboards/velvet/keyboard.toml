@@ -10,6 +10,11 @@ chip = "nrf52840"
 vial_enabled = true
 unlock_keys = [[0, 0], [0, 1]]
 
+[event]
+action.channel_size = 16
+action.subs = 1
+keyboard.subs = 4
+
 [layout]
 rows = 8
 cols = 6
@@ -61,10 +66,6 @@ _   _  F9  F10  F11  F12  OutputUsb  MediaPrevTrack  MediaPlayPause  MediaNextTr
 
 [ble]
 enabled = true
-# Battery ADC: P0_31 (AIN7), voltage divider 1564k/(806k+1564k)
-battery_adc_pin = "P0_31"
-adc_divider_measured = 782
-adc_divider_total = 1185
 
 [split]
 connection = "ble"
@@ -84,8 +85,6 @@ rows = 4
 cols = 6
 row_offset = 4
 col_offset = 0
-# Note: battery_adc_pin for peripheral requires upstream RMK (not yet in crates.io 0.8.2)
-# Peripheral battery level will show 0% until RMK 0.9 release
 
 [split.peripheral.matrix]
 row_pins = ["P1_13", "P0_02", "P0_29", "P0_30"]
@@ -93,6 +92,7 @@ col_pins = ["P0_24", "P0_09", "P0_10", "P1_11", "P1_10", "P0_03"]
 
 [rmk]
 split_peripherals_num = 1
+split_central_sleep_timeout_seconds = 120
 combo_max_num = 32
 morse_max_num = 32
 macro_space_size = 2048

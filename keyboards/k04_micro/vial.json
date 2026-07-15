@@ -142,7 +142,7 @@
         {
             "name": "Bluetooth settings",
             "fields": [
-                { "type": "select", "title": "Sleep timeout", "qsid": 323, "variants": ["10 minutes", "15 minutes", "20 minutes", "30 minutes", "45 minutes", "1 hour", "2 hours", "3 hours", "4 hours", "5 hours"] },
+                { "type": "select", "title": "Sleep timeout", "qsid": 323, "variants": ["Never", "10 minutes", "15 minutes", "20 minutes", "30 minutes", "45 minutes", "1 hour", "2 hours", "3 hours", "4 hours", "5 hours"] },
                 { "type": "select", "title": "BT profile 0 color", "qsid": 318, "variants": ["Off", "White", "Red", "Orange", "Goldenrod", "Gold", "Yellow", "Chartreuse", "Lime", "Green", "Spring Green", "Turquoise", "Teal", "Cyan", "Azure", "Sky", "Blue", "Indigo", "Purple", "Magenta", "Pink", "Coral", "Salmon", "Warm White", "Amber"] },
                 { "type": "select", "title": "BT profile 1 color", "qsid": 319, "variants": ["Off", "White", "Red", "Orange", "Goldenrod", "Gold", "Yellow", "Chartreuse", "Lime", "Green", "Spring Green", "Turquoise", "Teal", "Cyan", "Azure", "Sky", "Blue", "Indigo", "Purple", "Magenta", "Pink", "Coral", "Salmon", "Warm White", "Amber"] },
                 { "type": "select", "title": "BT profile 2 color", "qsid": 320, "variants": ["Off", "White", "Red", "Orange", "Goldenrod", "Gold", "Yellow", "Chartreuse", "Lime", "Green", "Spring Green", "Turquoise", "Teal", "Cyan", "Azure", "Sky", "Blue", "Indigo", "Purple", "Magenta", "Pink", "Coral", "Salmon", "Warm White", "Amber"] },

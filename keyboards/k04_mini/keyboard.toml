@@ -12,6 +12,11 @@ vial_enabled = true
 # Unlock keys: hold simultaneously to unlock Vial config
 unlock_keys = [[0, 5], [0, 4]]
 
+[event]
+action.channel_size = 16
+action.subs = 2
+keyboard.subs = 4
+
 [layout]
 rows = 8
 cols = 6
@@ -83,12 +88,6 @@ encoders = [["MouseWheelDown","MouseWheelUp"],["MouseWheelDown","MouseWheelUp"]]
 
 [ble]
 enabled = true
-# Battery ADC: P0_31 (AIN7), voltage divider 1564k/(806k+1564k)
-# DIV = P0.31/AIN7
-battery_adc_pin = "P0_31"
-# LED = P0.30/AIN6 is driven by K04 layer RGB indication
-adc_divider_measured = 782
-adc_divider_total = 1185
 
 [split]
 connection = "ble"

@@ -1,7 +1,5 @@
 use core::fmt::Debug;
 
-#[cfg(all(feature = "split", feature = "_ble"))]
-use embassy_futures::select::{Either, select};
 use embassy_futures::yield_now;
 #[cfg(feature = "_ble")]
 use embassy_sync::signal::Signal;
@@ -18,8 +16,6 @@ use usbd_hid::descriptor::{MediaKeyboardReport, SystemControlReport};
 
 use crate::channel::send_hid_report;
 use crate::core_traits::Runnable;
-#[cfg(all(feature = "split", feature = "_ble"))]
-use crate::event::ClearPeerEvent;
 use crate::event::{
     ActionEvent, KeyboardEvent, KeyboardEventPos, ModifierEvent, SubscribableEvent, publish_event, publish_event_async,
 };
@@ -1313,7 +1309,7 @@ impl<'a> Keyboard<'a> {
             Action::Light(_light_action) => warn!("Light controll is not supported"),
             Action::KeyboardControl(c) => self.process_action_keyboard_control(c, event).await,
             Action::Special(special_key) => self.process_action_special(special_key, event).await,
-            Action::User(id) => self.process_user(id, event).await,
+            Action::User(_id) => {}
             Action::TriLayerLower => {
                 // Tri-layer lower, turn layer 1 on and update layer state
                 self.process_action_layer_switch(1, event);
@@ -1514,6 +1510,30 @@ impl<'a> Keyboard<'a> {
                         .await;
                 }
             }
+            KeyboardAction::OutputUsb => {
+                if !event.pressed {
+                    #[cfg(not(feature = "_no_usb"))]
+                    crate::state::set_preferred_connection_persistent(
+                        rmk_types::connection::ConnectionType::Usb,
+                    )
+                    .await;
+
+                    #[cfg(feature = "_no_usb")]
+                    warn!("USB output is not available in this build");
+                }
+            }
+            KeyboardAction::OutputBluetooth => {
+                if !event.pressed {
+                    #[cfg(feature = "_ble")]
+                    crate::state::set_preferred_connection_persistent(
+                        rmk_types::connection::ConnectionType::Ble,
+                    )
+                    .await;
+
+                    #[cfg(not(feature = "_ble"))]
+                    warn!("Bluetooth output is not available in this build");
+                }
+            }
 
             _ => warn!("KeyboardAction: {:?} is not supported yet", keyboard_control),
         }
@@ -1590,7 +1610,7 @@ impl<'a> Keyboard<'a> {
 
     /// Process consumer control action. Consumer control keys are keys in hid consumer page, such as media keys.
     async fn process_action_consumer_control(&mut self, key: ConsumerKey, event: KeyboardEvent) {
-        self.media_report.usage_id = if event.pressed { key.into() } else { 0 };
+        self.media_report.usage_id = if event.pressed { key as u16 } else { 0 };
 
         self.send_media_report().await;
     }
@@ -1633,68 +1653,6 @@ impl<'a> Keyboard<'a> {
             self.keymap.set_mouse_buttons(self.mouse.report.buttons);
             self.send_report(Report::MouseReport(report)).await;
             yield_now().await;
-        }
-    }
-
-    async fn process_user(&mut self, id: u8, event: KeyboardEvent) {
-        debug!("Processing user key id: {:?}, event: {:?}", id, event);
-
-        #[cfg(feature = "_ble")]
-        {
-            use crate::NUM_BLE_PROFILE;
-            use crate::ble::profile::BleProfileAction;
-            use crate::channel::BLE_PROFILE_CHANNEL;
-            if event.pressed {
-                // Clear Peer is processed when pressed
-                if id == NUM_BLE_PROFILE as u8 + 4 {
-                    #[cfg(feature = "split")]
-                    if event.pressed {
-                        // Wait for 5s, if the key is still pressed, clear split peer info
-                        // If there's any other key event received during this period, skip
-                        match select(
-                            embassy_time::Timer::after_millis(5000),
-                            self.keyboard_event_subscriber.next_message_pure(),
-                        )
-                        .await
-                        {
-                            Either::First(_) => {
-                                // Timeout reached, send clear peer message
-                                #[cfg(feature = "split")]
-                                publish_event(ClearPeerEvent);
-                                info!("Clear peer");
-                            }
-                            Either::Second(e) => {
-                                // Received a new key event before timeout, add to unprocessed list
-                                if self.unprocessed_events.push(e).is_err() {
-                                    warn!("Unprocessed event queue is full, dropping event");
-                                }
-                            }
-                        }
-                    }
-                }
-            } else {
-                // Other user keys are processed when released.
-                // Slots 0..NUM_BLE_PROFILE select a profile directly; the next four are
-                // fixed actions stacked on top.
-                if id < NUM_BLE_PROFILE as u8 {
-                    info!("Switch to profile: {}", id);
-                    BLE_PROFILE_CHANNEL.send(BleProfileAction::Switch(id)).await;
-                } else if id == NUM_BLE_PROFILE as u8 {
-                    // Next profile
-                    BLE_PROFILE_CHANNEL.send(BleProfileAction::Next).await;
-                } else if id == NUM_BLE_PROFILE as u8 + 1 {
-                    // Previous profile
-                    BLE_PROFILE_CHANNEL.send(BleProfileAction::Previous).await;
-                } else if id == NUM_BLE_PROFILE as u8 + 2 {
-                    // Clear bond on current profile
-                    BLE_PROFILE_CHANNEL.send(BleProfileAction::ClearBond).await;
-                } else if id == NUM_BLE_PROFILE as u8 + 3 {
-                    // Toggle preferred transport (USB <-> BLE);
-                    // only meaningful when both transports exist in this build.
-                    #[cfg(not(feature = "_no_usb"))]
-                    crate::state::toggle_preferred().await;
-                }
-            }
         }
     }
 

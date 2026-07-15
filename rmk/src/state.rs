@@ -85,6 +85,15 @@ pub(crate) fn set_preferred_connection(t: ConnectionType) {
     update_status(|c| c.preferred = t);
 }
 
+/// Set and persist the preferred transport when storage is available.
+pub(crate) async fn set_preferred_connection_persistent(t: ConnectionType) {
+    set_preferred_connection(t);
+    #[cfg(feature = "storage")]
+    crate::channel::FLASH_CHANNEL
+        .send(crate::storage::FlashOperationMessage::ConnectionType(t))
+        .await;
+}
+
 /// Load the preferred connection type at startup.
 ///
 /// With the `storage` feature, reads the persisted `ConnectionType` from flash;

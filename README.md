@@ -40,6 +40,12 @@ cargo build --release --bin central
 cargo build --release --bin peripheral
 ```
 
+Current K:04/OP36 root-RMK regression matrix:
+
+```sh
+./scripts/build_k04_matrix.sh
+```
+
 ## Flashing
 
 1. Put device into bootloader (double-tap reset)
@@ -58,8 +64,5 @@ Every push builds all devices in parallel via GitHub Actions. UF2 artifacts avai
 
 Based on [RMK](https://github.com/HaoboGu/rmk) 0.8.2 with nRF52840 BLE support.
 
-`keyboards/op36_qube` and `keyboards/k04_qube` are isolated on
-`common/rmk-main-upstream`, vendored from official RMK upstream
-`https://github.com/HaoboGu/rmk` main at commit
-`baaab8b7d839e8938e016892965891f1bde45efe`, so current 0.8.2 firmwares are not
-mixed with the Qube runtime.
+The root `rmk`, `rmk-macro`, `rmk-types`, and `rmk-config` crates are the
+current source of truth for all firmware targets in this repository.

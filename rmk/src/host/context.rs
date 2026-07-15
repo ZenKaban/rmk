@@ -314,6 +314,11 @@ impl<'a> KeyboardContext<'a> {
         crate::input_device::battery::current_battery_status()
     }
 
+    #[cfg(all(feature = "split", feature = "_ble"))]
+    pub fn peripheral_battery_status(&self, id: usize) -> BatteryStatus {
+        crate::split::battery::current_peripheral_battery_status(id)
+    }
+
     pub fn active_layer(&self) -> u8 {
         self.keymap.active_layer()
     }
