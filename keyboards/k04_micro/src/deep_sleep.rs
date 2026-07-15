@@ -6,6 +6,30 @@ const COL_OUTPUT_PINS: &[(u8, usize)] = &[(1, 6), (1, 4), (1, 2), (1, 0), (0, 22
 const WAKE_SETTLE_MS: u64 = 50;
 const ACTIVE_WAKE_RETRY_MS: u64 = 500;
 const SYSTEM_OFF_LED_SETTLE_MS: u64 = 300;
+const GPIOTE_BASE: usize = 0x4000_6000;
+const GPIOTE_EVENTS_PORT: usize = 0x17c;
+const GPIOTE_INTENCLR: usize = 0x308;
+const GPIOTE_CONFIG0: usize = 0x510;
+const GPIOTE_CONFIG_COUNT: usize = 8;
+const TASKS_STOP: usize = 0x014;
+const EVENTS_STOPPED: usize = 0x104;
+const ENABLE: usize = 0x500;
+const PWM0_BASE: usize = 0x4001_c000;
+const PWM_TASKS_STOP: usize = 0x004;
+const TWIM1_BASE: usize = 0x4000_4000;
+const SAADC_BASE: usize = 0x4000_7000;
+const SOFT_OFF_IRQ_MASK0: u32 = (1 << 0)  // POWER_CLOCK
+    | (1 << 1)  // RADIO
+    | (1 << 4)  // TWISPI1
+    | (1 << 6)  // GPIOTE
+    | (1 << 7)  // SAADC
+    | (1 << 8)  // TIMER0
+    | (1 << 11) // RTC0
+    | (1 << 12) // TEMP
+    | (1 << 20) // SWI0_EGU0
+    | (1 << 28); // PWM0
+const NVIC_ICER0: usize = 0xe000_e180;
+const NVIC_ICPR0: usize = 0xe000_e280;
 
 #[embassy_executor::task]
 pub async fn deep_sleep_task() {
@@ -52,9 +76,60 @@ async fn prepare_matrix_wake() -> bool {
 }
 
 fn enter_system_off() -> ! {
+    prepare_soft_off_state();
     embassy_nrf::power::set_system_off();
     loop {
         cortex_m::asm::wfi();
+    }
+}
+
+fn prepare_soft_off_state() {
+    shutdown_ble_stack_for_soft_off();
+    cortex_m::interrupt::disable();
+    disable_soft_off_irqs();
+
+    // Mirror Zephyr's soft-off shape: quiesce local peripheral state, remove
+    // GPIOTE runtime triggers, then leave only GPIO SENSE as the wake source.
+    stop_peripheral(PWM0_BASE, PWM_TASKS_STOP);
+    stop_peripheral(TWIM1_BASE, TASKS_STOP);
+    stop_peripheral(SAADC_BASE, TASKS_STOP);
+    clear_gpiote_runtime_state();
+    configure_matrix_wake();
+    clear_gpio_latches();
+    cortex_m::asm::dsb();
+    cortex_m::asm::isb();
+}
+
+fn shutdown_ble_stack_for_soft_off() {
+    unsafe {
+        let _ = nrf_sdc::raw::sdc_disable();
+        let _ = nrf_sdc::mpsl::raw::mpsl_uninit();
+    }
+}
+
+fn disable_soft_off_irqs() {
+    unsafe {
+        core::ptr::write_volatile(NVIC_ICER0 as *mut u32, SOFT_OFF_IRQ_MASK0);
+        core::ptr::write_volatile(NVIC_ICPR0 as *mut u32, SOFT_OFF_IRQ_MASK0);
+    }
+}
+
+fn stop_peripheral(base: usize, task_stop: usize) {
+    write_reg(base, EVENTS_STOPPED, 0);
+    write_reg(base, task_stop, 1);
+    for _ in 0..1024 {
+        if read_reg(base, EVENTS_STOPPED) != 0 {
+            break;
+        }
+    }
+    write_reg(base, ENABLE, 0);
+}
+
+fn clear_gpiote_runtime_state() {
+    write_reg(GPIOTE_BASE, GPIOTE_INTENCLR, 0xffff_ffff);
+    write_reg(GPIOTE_BASE, GPIOTE_EVENTS_PORT, 0);
+    for channel in 0..GPIOTE_CONFIG_COUNT {
+        write_reg(GPIOTE_BASE, GPIOTE_CONFIG0 + channel * 4, 0);
     }
 }
 
@@ -101,6 +176,14 @@ fn any_wake_input_active() -> bool {
 fn clear_gpio_latches() {
     embassy_nrf::pac::P0.latch().write(|w| w.0 = 0xffff_ffff);
     embassy_nrf::pac::P1.latch().write(|w| w.0 = 0xffff_ffff);
+}
+
+fn write_reg(base: usize, offset: usize, value: u32) {
+    unsafe { core::ptr::write_volatile((base + offset) as *mut u32, value) }
+}
+
+fn read_reg(base: usize, offset: usize) -> u32 {
+    unsafe { core::ptr::read_volatile((base + offset) as *const u32) }
 }
 
 fn gpio_port(port: u8) -> embassy_nrf::pac::gpio::Gpio {
