@@ -151,7 +151,7 @@ clear_layout = true
 
 [behavior.morse]
 enable_flow_tap = true
-prior_idle_time = "120ms"
+prior_idle_time = "50ms"
 unilateral_tap = false
 hold_on_other_press = false
 hold_timeout = "220ms"
