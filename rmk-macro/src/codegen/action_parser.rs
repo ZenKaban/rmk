@@ -305,9 +305,9 @@ fn parse_action(key: &str) -> TokenStream2 {
             ""
         };
         let number = number_str.parse::<u8>().unwrap_or(255);
-        if number > 31 {
+        if number > 63 {
             panic!(
-                "\n\u{274c} keyboard.toml: {} is not a valid user key! User keys are numbered 0-31. Please check the documentation: https://rmk.rs/docs/features/configuration/layout.html",
+                "\n\u{274c} keyboard.toml: {} is not a valid user key! User keys are numbered 0-63. Please check the documentation: https://rmk.rs/docs/features/configuration/layout.html",
                 key
             );
         }

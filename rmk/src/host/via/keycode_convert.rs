@@ -96,7 +96,7 @@ pub(crate) fn to_via_keycode(key_action: KeyAction) -> u16 {
                     0
                 }
             },
-            Action::User(id) => (id as u16 & 0x1F) | 0x7E00,
+            Action::User(id) => (id as u16 & 0x3F) | 0x7E00,
             _ => {
                 warn!("Action: {:?} in vial is not supported yet", a);
                 0
@@ -247,9 +247,9 @@ pub(crate) fn from_via_keycode(via_keycode: u16) -> KeyAction {
             );
             KeyAction::No
         }
-        0x7E00..=0x7E1F => {
+        0x7E00..=0x7E3F => {
             // QK_KB_N, aka UserN
-            KeyAction::Single(Action::User(via_keycode as u8 & 0x1F))
+            KeyAction::Single(Action::User(via_keycode as u8 & 0x3F))
         }
         _ => {
             warn!("Via keycode {:#X} is not processed", via_keycode);
@@ -288,9 +288,9 @@ mod test {
         let via_keycode = 0x7E10;
         assert_eq!(KeyAction::Single(Action::User(16)), from_via_keycode(via_keycode));
 
-        // User31 (QK_KB_31)
-        let via_keycode = 0x7E1F;
-        assert_eq!(KeyAction::Single(Action::User(31)), from_via_keycode(via_keycode));
+        // User63 (QK_KB_63)
+        let via_keycode = 0x7E3F;
+        assert_eq!(KeyAction::Single(Action::User(63)), from_via_keycode(via_keycode));
 
         // ClearEeprom (QK_CLEAR_EEPROM)
         let via_keycode = 0x7C03;
@@ -528,9 +528,9 @@ mod test {
         let a = KeyAction::Single(Action::User(16));
         assert_eq!(0x7E10, to_via_keycode(a));
 
-        // User31 (QK_KB_31)
-        let a = KeyAction::Single(Action::User(31));
-        assert_eq!(0x7E1F, to_via_keycode(a));
+        // User63 (QK_KB_63)
+        let a = KeyAction::Single(Action::User(63));
+        assert_eq!(0x7E3F, to_via_keycode(a));
 
         // ClearEeprom (QK_CLEAR_EEPROM)
         let a = KeyAction::Single(Action::KeyboardControl(KeyboardAction::ClearEeprom));

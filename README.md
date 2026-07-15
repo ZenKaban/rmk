@@ -58,8 +58,9 @@ Every push builds all devices in parallel via GitHub Actions. UF2 artifacts avai
 
 Based on [RMK](https://github.com/HaoboGu/rmk) 0.8.2 with nRF52840 BLE support.
 
-`keyboards/op36_qube` and `keyboards/k04_qube` are isolated on
-`common/rmk-main-upstream`, vendored from official RMK upstream
-`https://github.com/HaoboGu/rmk` main at commit
-`baaab8b7d839e8938e016892965891f1bde45efe`, so current 0.8.2 firmwares are not
-mixed with the Qube runtime.
+The root `rmk`, `rmk-macro`, `rmk-types`, and `rmk-config` crates are the
+current source of truth for K:04, K:04 Mini, K:04 Micro, K:04 Qube, and OP36
+Qube targets.
+
+The remaining `common/rmk-0.8.2-*` directories are legacy forks used only by
+older keyboard targets that have not been migrated yet.

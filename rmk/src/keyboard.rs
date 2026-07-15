@@ -66,6 +66,7 @@ const K04_USER_BT_CLEAR: u8 = 26;
 const K04_USER_BT_TOGGLE: u8 = 27;
 const K04_USER_BT_OUTPUT: u8 = 37;
 const K04_USER_USB_OUTPUT: u8 = 38;
+const K04_USER_BATTERY_LEVEL: u8 = 39;
 const K04_USER_BT_CLEAR_PEER: u8 = 40;
 
 /// Read the current host-driven lock LED state as a typed [`LedIndicator`].
@@ -1708,7 +1709,9 @@ impl<'a> Keyboard<'a> {
                         crate::state::set_preferred_connection(ConnectionType::Ble);
                         #[cfg(feature = "storage")]
                         crate::channel::FLASH_CHANNEL
-                            .send(crate::storage::FlashOperationMessage::ConnectionType(ConnectionType::Ble))
+                            .send(crate::storage::FlashOperationMessage::ConnectionType(
+                                ConnectionType::Ble,
+                            ))
                             .await;
                         return;
                     }
@@ -1716,8 +1719,14 @@ impl<'a> Keyboard<'a> {
                         crate::state::set_preferred_connection(ConnectionType::Usb);
                         #[cfg(feature = "storage")]
                         crate::channel::FLASH_CHANNEL
-                            .send(crate::storage::FlashOperationMessage::ConnectionType(ConnectionType::Usb))
+                            .send(crate::storage::FlashOperationMessage::ConnectionType(
+                                ConnectionType::Usb,
+                            ))
                             .await;
+                        return;
+                    }
+                    K04_USER_BATTERY_LEVEL => {
+                        publish_event(crate::event::PeripheralBatteryRefreshEvent);
                         return;
                     }
                     _ => {}
