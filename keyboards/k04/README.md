@@ -2,14 +2,15 @@
 
 No-Qube split BLE firmware for the ordinary K:04 halves.
 
-This target intentionally uses the local legacy RMK 0.8.2 stack:
+This target intentionally uses the local K:04 common stack:
 
-- `common/rmk-0.8.2-k04`
-- `common/rmk-macro-0.7.1-k04`
-- `common/rmk-types-0.2.2-k04`
+- `common/rmk-common-k04`
+- `common/rmk-macro-common-k04`
+- `common/rmk-types-common-k04`
 
-Keep this separate from `keyboards/k04_qube`: the Qube target stays on the root
-RMK crates because its dongle connection path is different and works there.
+Keep this separate from `keyboards/k04_qube`: the common path is for ordinary
+halves, while the Qube path stays on the root RMK crates because its dongle
+connection flow is different and works there.
 
 ## Build
 

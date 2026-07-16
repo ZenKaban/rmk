@@ -26,10 +26,10 @@ cargo make uf2
 ## Scope
 
 The first K:04 Qube target covers matrix, split BLE, two encoders, battery
-telemetry, and the Qube status screen. The existing `keyboards/k04` target keeps
-the legacy RMK 0.8.2 split BLE path for no-Qube keyboards, plus the older custom
-layer LED, trackball, touchpad, and module-settings runtime until those modules
-are ported to RMK main.
+telemetry, and the Qube status screen. The existing `keyboards/k04` target uses
+the common split BLE path for no-Qube keyboards, plus the older custom layer
+LED, trackball, touchpad, and module-settings runtime until those modules are
+ported to RMK main.
 
 ## Battery
 
