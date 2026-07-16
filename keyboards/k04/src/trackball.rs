@@ -1,23 +1,32 @@
+// k04-modules-v0.0.55: hot-retry PMW3610 trackball task with bounded motion backlog.
+// RMK 0.8.2's generated Pmw3610Device stops forever after failed init, so K04
+// owns the sensor task here and keeps probing for replaceable modules.
+
 use embassy_nrf::gpio::{Flex, Input, Level, Output, OutputDrive, Pull};
 use embassy_nrf::Peri;
-use embassy_time::{Duration, Instant, Timer};
+use embassy_time::{with_timeout, Duration, Instant, Timer};
 use rmk::driver::bitbang_spi::BitBangSpiBus;
-use rmk::event::{publish_event, Axis, AxisEvent, AxisValType, LayerChangeEvent, PointingEvent};
+use rmk::event::Event;
 use rmk::input_device::pmw3610::{Pmw3610, Pmw3610Config};
-use rmk::input_device::pointing::PointingDriver;
-use rmk::macros::processor;
 
-use crate::module_settings;
+use crate::vial_settings::{
+    ball_cpi, claim_pointing_module, kind_index, pointing_module_claimed_by_other,
+    pointing_module_enabled, release_pointing_module, side_index,
+    wait_pointing_module_selection_change, ModuleKind, ModuleSide,
+};
 
-const PROBE_INTERVAL_MS: u32 = 250;
+const PROBE_INTERVAL_MS: u64 = 250;
+const MOTION_WAIT_CHECK_MS: u64 = 100;
+// Match Ergohaven ZMK PMW3610 report cadence to reduce BLE mouse traffic.
 const REPORT_INTERVAL_MS: u32 = 12;
 const MOTION_ACCUM_LIMIT: i32 = (i8::MAX as i32) * 2;
-const DEFAULT_CPI: u16 = 1000;
+const CUSTOM_MAGIC: [u8; 4] = *b"K04P";
+const CUSTOM_MOTION: u8 = 3;
 
-pub type K04Trackball = Pmw3610<BitBangSpiBus<Output<'static>, Flex<'static>>, Output<'static>, Input<'static>>;
+pub type K04Trackball =
+    Pmw3610<BitBangSpiBus<Output<'static>, Flex<'static>>, Output<'static>, Input<'static>>;
 
 pub fn new_trackball(
-    id: u8,
     sck: Output<'static>,
     sdio: Flex<'static>,
     cs: Output<'static>,
@@ -25,25 +34,23 @@ pub fn new_trackball(
 ) -> K04Trackball {
     let spi = BitBangSpiBus::new(sck, sdio);
     let config = Pmw3610Config {
-        res_cpi: DEFAULT_CPI as i16,
+        res_cpi: 1000,
         swap_xy: true,
         invert_x: false,
         invert_y: false,
         force_awake: false,
         smart_mode: true,
     };
-    Pmw3610::new(id, spi, cs, Some(motion), config)
+    Pmw3610::new(spi, cs, Some(motion), config)
 }
 
 pub fn new_trackball_from_pins(
-    id: u8,
     sck: Peri<'static, embassy_nrf::peripherals::P0_01>,
     sdio: Peri<'static, embassy_nrf::peripherals::P0_00>,
     cs: Peri<'static, embassy_nrf::peripherals::P0_05>,
     motion: Peri<'static, embassy_nrf::peripherals::P1_09>,
 ) -> K04Trackball {
     new_trackball(
-        id,
         Output::new(sck, Level::High, OutputDrive::Standard),
         Flex::new(sdio),
         Output::new(cs, Level::High, OutputDrive::Standard),
@@ -51,116 +58,104 @@ pub fn new_trackball_from_pins(
     )
 }
 
-#[processor(subscribe = [LayerChangeEvent], poll_interval = 12)]
-pub struct Trackball {
-    trackball: K04Trackball,
-    device_id: u8,
-    ready: bool,
-    acc_x: i32,
-    acc_y: i32,
-    last_report_ms: u32,
-    next_probe_ms: u32,
-    current_cpi: u16,
-}
+#[embassy_executor::task]
+pub async fn trackball_task(mut trackball: K04Trackball, side: ModuleSide) {
+    let mut ready = false;
+    let mut acc_x = 0i32;
+    let mut acc_y = 0i32;
+    let mut last_report_ms = now_ms();
+    let mut applied_cpi = 0u16;
 
-impl Trackball {
-    pub fn new(trackball: K04Trackball, device_id: u8) -> Self {
-        Self {
-            trackball,
-            device_id,
-            ready: false,
-            acc_x: 0,
-            acc_y: 0,
-            last_report_ms: 0,
-            next_probe_ms: 0,
-            current_cpi: DEFAULT_CPI,
+    loop {
+        if !pointing_module_enabled(side, ModuleKind::Ball) {
+            release_pointing_module(ModuleKind::Ball);
+            ready = false;
+            acc_x = 0;
+            acc_y = 0;
+            wait_pointing_module_selection_change(side, ModuleKind::Ball).await;
+            continue;
         }
-    }
 
-    async fn on_layer_change_event(&mut self, _event: LayerChangeEvent) {}
+        if pointing_module_claimed_by_other(ModuleKind::Ball) {
+            ready = false;
+            acc_x = 0;
+            acc_y = 0;
+            Timer::after(Duration::from_millis(50)).await;
+            continue;
+        }
 
-    async fn poll(&mut self) {
-        if !self.ready {
-            let now = now_ms();
-            if self.next_probe_ms != 0 && now.wrapping_sub(self.next_probe_ms) < u32::MAX / 2 {
-                return;
-            }
-
-            match self.trackball.init().await {
+        if !ready {
+            release_pointing_module(ModuleKind::Ball);
+            match trackball.init().await {
                 Ok(()) => {
-                    self.current_cpi = module_settings::ball_cpi(self.device_id);
-                    let _ = self.trackball.set_resolution(self.current_cpi).await;
-                    self.ready = true;
-                    self.acc_x = 0;
-                    self.acc_y = 0;
-                    self.last_report_ms = now_ms();
+                    if !claim_pointing_module(ModuleKind::Ball) {
+                        Timer::after(Duration::from_millis(50)).await;
+                        continue;
+                    }
+                    applied_cpi = ball_cpi(side);
+                    let _ = trackball.set_resolution(applied_cpi).await;
+                    ready = true;
+                    ::defmt::info!("K04 PMW3610 initialized");
                 }
-                Err(_) => {
-                    self.next_probe_ms = now.wrapping_add(PROBE_INTERVAL_MS);
-                    Timer::after(Duration::from_millis(1)).await;
-                    return;
+                Err(_e) => {
+                    release_pointing_module(ModuleKind::Ball);
+                    Timer::after(Duration::from_millis(PROBE_INTERVAL_MS)).await;
+                    continue;
                 }
             }
         }
 
-        let configured_cpi = module_settings::ball_cpi(self.device_id);
-        if configured_cpi != self.current_cpi && self.trackball.set_resolution(configured_cpi).await.is_ok() {
-            self.current_cpi = configured_cpi;
+        let configured_cpi = ball_cpi(side);
+        if configured_cpi != applied_cpi {
+            if trackball.set_resolution(configured_cpi).await.is_ok() {
+                applied_cpi = configured_cpi;
+            }
         }
 
-        while self.trackball.motion_pending() {
-            match self.trackball.read_motion().await {
+        let _ = with_timeout(
+            Duration::from_millis(MOTION_WAIT_CHECK_MS),
+            trackball.wait_for_motion(),
+        )
+        .await;
+        if !pointing_module_enabled(side, ModuleKind::Ball) {
+            release_pointing_module(ModuleKind::Ball);
+            ready = false;
+            acc_x = 0;
+            acc_y = 0;
+            continue;
+        }
+
+        while trackball.motion_pending() {
+            match trackball.read_motion().await {
                 Ok(motion) => {
-                    self.acc_x = clamp_motion_accum(self.acc_x.saturating_add(motion.dx as i32));
-                    self.acc_y = clamp_motion_accum(self.acc_y.saturating_add(motion.dy as i32));
+                    acc_x = clamp_motion_accum(acc_x.saturating_add(motion.dx as i32));
+                    acc_y = clamp_motion_accum(acc_y.saturating_add(motion.dy as i32));
+
+                    let now = now_ms();
+                    if now.wrapping_sub(last_report_ms) >= REPORT_INTERVAL_MS
+                        && send_accumulated_motion(&mut acc_x, &mut acc_y, side).await
+                    {
+                        last_report_ms = now;
+                    }
                 }
-                Err(_) => {
-                    self.ready = false;
-                    self.next_probe_ms = now_ms().wrapping_add(PROBE_INTERVAL_MS);
-                    self.acc_x = 0;
-                    self.acc_y = 0;
-                    return;
+                Err(_e) => {
+                    send_accumulated_motion(&mut acc_x, &mut acc_y, side).await;
+                    acc_x = 0;
+                    acc_y = 0;
+                    ready = false;
+                    release_pointing_module(ModuleKind::Ball);
+                    Timer::after(Duration::from_millis(PROBE_INTERVAL_MS)).await;
+                    continue;
                 }
             }
         }
 
         let now = now_ms();
-        if now.wrapping_sub(self.last_report_ms) >= REPORT_INTERVAL_MS {
-            self.send_accumulated_motion();
-            self.last_report_ms = now;
+        if now.wrapping_sub(last_report_ms) >= REPORT_INTERVAL_MS
+            && send_accumulated_motion(&mut acc_x, &mut acc_y, side).await
+        {
+            last_report_ms = now;
         }
-    }
-
-    fn send_accumulated_motion(&mut self) {
-        if self.acc_x == 0 && self.acc_y == 0 {
-            return;
-        }
-
-        let report_x = self.acc_x.clamp(i8::MIN as i32, i8::MAX as i32) as i16;
-        let report_y = self.acc_y.clamp(i8::MIN as i32, i8::MAX as i32) as i16;
-        self.acc_x -= report_x as i32;
-        self.acc_y -= report_y as i32;
-
-        publish_event(PointingEvent {
-            device_id: self.device_id,
-            axes: [
-                AxisEvent {
-                    typ: AxisValType::Rel,
-                    axis: Axis::X,
-                    value: report_x,
-                },
-                AxisEvent {
-                    typ: AxisValType::Rel,
-                    axis: Axis::Y,
-                    value: report_y,
-                },
-                AxisEvent {
-                    typ: AxisValType::Rel,
-                    axis: Axis::Z,
-                    value: 0,
-                },
-            ],
-        });
     }
 }
 
@@ -170,4 +165,43 @@ fn now_ms() -> u32 {
 
 fn clamp_motion_accum(value: i32) -> i32 {
     value.clamp(-MOTION_ACCUM_LIMIT, MOTION_ACCUM_LIMIT)
+}
+
+async fn send_accumulated_motion(acc_x: &mut i32, acc_y: &mut i32, side: ModuleSide) -> bool {
+    if *acc_x == 0 && *acc_y == 0 {
+        return false;
+    }
+
+    let report_x = (*acc_x).clamp(i8::MIN as i32, i8::MAX as i32) as i16;
+    let report_y = (*acc_y).clamp(i8::MIN as i32, i8::MAX as i32) as i16;
+    let event = custom_motion(side, ModuleKind::Ball, report_x, report_y);
+
+    if send_motion_event_latest(event) {
+        *acc_x -= report_x as i32;
+        *acc_y -= report_y as i32;
+        true
+    } else {
+        false
+    }
+}
+
+fn send_motion_event_latest(event: Event) -> bool {
+    match rmk::channel::EVENT_CHANNEL.try_send(event) {
+        Ok(()) => true,
+        Err(rmk::channel::channel::TrySendError::Full(event)) => {
+            let _ = rmk::channel::EVENT_CHANNEL.try_receive();
+            rmk::channel::EVENT_CHANNEL.try_send(event).is_ok()
+        }
+    }
+}
+
+fn custom_motion(side: ModuleSide, kind: ModuleKind, x: i16, y: i16) -> Event {
+    let mut data = [0u8; 16];
+    data[0..4].copy_from_slice(&CUSTOM_MAGIC);
+    data[4] = CUSTOM_MOTION;
+    data[5] = side_index(side);
+    data[6] = kind_index(kind);
+    data[7..9].copy_from_slice(&x.to_be_bytes());
+    data[9..11].copy_from_slice(&y.to_be_bytes());
+    Event::Custom(data)
 }

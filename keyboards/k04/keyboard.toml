@@ -71,8 +71,8 @@ name = "Adjust"
 keys = """
 Bootloader  _      _  _  _  _  User19 User20 User21 User22 User23 User26
 _           _  _  _  _  _  _    _    _    _    _    _
-_           _  _  _  _  _  _ _ _ _    _    _
-_           _  _  _  _  _  _    _    _ _    _    _  _  _
+_           _  _  _  _  _  User37 User39 _ _    _    _
+_           _  _  _  _  _  _    _    User38 _    _    _  _  _
 _   _   _              _               _              _   _   _            _               _
 """
 encoders = [["AudioVolUp","AudioVolDown"],["AudioVolUp","AudioVolDown"]]
@@ -91,17 +91,12 @@ encoders = [["MouseWheelDown","MouseWheelUp"],["MouseWheelDown","MouseWheelUp"]]
 
 [ble]
 enabled = true
-
-[event]
-action.channel_size = 16
-action.subs = 2
-keyboard.subs = 4
-peripheral_battery.pubs = 2
-peripheral_battery.subs = 4
-layer_change.channel_size = 4
-layer_change.subs = 6
-modifier.channel_size = 8
-modifier.subs = 6
+# Battery ADC: P0_31 (AIN7), voltage divider 1564k/(806k+1564k)
+# DIV = P0.31/AIN7
+battery_adc_pin = "P0_31"
+# LED = P0.30/AIN6 is driven by K04 layer RGB indication
+adc_divider_measured = 782
+adc_divider_total = 1185
 
 [split]
 connection = "ble"
@@ -114,7 +109,6 @@ col_offset = 0
 # ble_addr removed — RMK manages addresses from storage automatically
 
 [split.central.matrix]
-matrix_type = "normal"
 # K04 schematic, same pinout on both halves
 # R1..R5 = P1.13, P0.28, P0.03, P1.10, P1.11
 # C1..C6 = P1.06, P1.04, P1.02, P1.00, P0.22, P0.20
@@ -137,7 +131,6 @@ col_offset = 0
 # ble_addr removed — RMK manages addresses from storage automatically
 
 [split.peripheral.matrix]
-matrix_type = "normal"
 # K04 schematic, same pinout on both halves
 # R1..R5 = P1.13, P0.28, P0.03, P1.10, P1.11
 # C1..C6 = P1.06, P1.04, P1.02, P1.00, P0.22, P0.20

@@ -24,7 +24,7 @@ bind_interrupts!(struct SaadcIrqs {
 });
 
 const EMPTY_MV: i32 = 3300;
-const FULL_MV: i32 = 4200;
+const FULL_MV: i32 = 4100;
 // Calibrated from K:04 Qube halves: raw ~= 2520 at 3.150 V and 2600 at 3.281 V.
 const RAW_PER_MV_NUM: i32 = 4;
 const RAW_PER_MV_DEN: i32 = 5;

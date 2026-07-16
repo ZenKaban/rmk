@@ -62,14 +62,14 @@ jobs:
         working-directory: keyboards/${{ matrix.keyboard }}
         env:
           BINDGEN_EXTRA_CLANG_ARGS: "--sysroot=/usr/lib/arm-none-eabi --target=arm-none-eabi -I/usr/lib/arm-none-eabi/include -I/usr/lib/gcc/arm-none-eabi/13.2.1/include"
-          RUST_MIN_STACK: "16777216"
+          RUST_MIN_STACK: "33554432"
         run: cargo build --release --bin central
 
       - name: Build Peripheral
         working-directory: keyboards/${{ matrix.keyboard }}
         env:
           BINDGEN_EXTRA_CLANG_ARGS: "--sysroot=/usr/lib/arm-none-eabi --target=arm-none-eabi -I/usr/lib/arm-none-eabi/include -I/usr/lib/gcc/arm-none-eabi/13.2.1/include"
-          RUST_MIN_STACK: "16777216"
+          RUST_MIN_STACK: "33554432"
         run: cargo build --release --bin peripheral
 
       - name: Convert to UF2
@@ -146,7 +146,7 @@ jobs:
         working-directory: keyboards/${{ matrix.keyboard }}
         env:
           BINDGEN_EXTRA_CLANG_ARGS: "--sysroot=/usr/lib/arm-none-eabi --target=arm-none-eabi -I/usr/lib/arm-none-eabi/include -I/usr/lib/gcc/arm-none-eabi/13.2.1/include"
-          RUST_MIN_STACK: "16777216"
+          RUST_MIN_STACK: "33554432"
         run: cargo build --release --bin keyboard
 
       - name: Convert to UF2
@@ -221,7 +221,7 @@ jobs:
         env:
           BINDGEN_EXTRA_CLANG_ARGS: "--sysroot=/usr/lib/arm-none-eabi --target=arm-none-eabi -I/usr/lib/arm-none-eabi/include -I/usr/lib/gcc/arm-none-eabi/13.2.1/include"
           CARGO_TARGET_DIR: target/qube
-          RUST_MIN_STACK: "16777216"
+          RUST_MIN_STACK: "33554432"
         run: cargo build --release --bin qube --features qube
 
       - name: Build left half
@@ -229,7 +229,7 @@ jobs:
         env:
           BINDGEN_EXTRA_CLANG_ARGS: "--sysroot=/usr/lib/arm-none-eabi --target=arm-none-eabi -I/usr/lib/arm-none-eabi/include -I/usr/lib/gcc/arm-none-eabi/13.2.1/include"
           CARGO_TARGET_DIR: target/halves
-          RUST_MIN_STACK: "16777216"
+          RUST_MIN_STACK: "33554432"
         run: cargo build --release --bin left
 
       - name: Build right half
@@ -237,7 +237,7 @@ jobs:
         env:
           BINDGEN_EXTRA_CLANG_ARGS: "--sysroot=/usr/lib/arm-none-eabi --target=arm-none-eabi -I/usr/lib/arm-none-eabi/include -I/usr/lib/gcc/arm-none-eabi/13.2.1/include"
           CARGO_TARGET_DIR: target/halves
-          RUST_MIN_STACK: "16777216"
+          RUST_MIN_STACK: "33554432"
         run: cargo build --release --bin right
 
       - name: Convert to UF2

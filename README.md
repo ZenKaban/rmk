@@ -40,7 +40,7 @@ cargo build --release --bin central
 cargo build --release --bin peripheral
 ```
 
-Current K:04/OP36 root-RMK regression matrix:
+Current K:04/OP36 regression matrix:
 
 ```sh
 ./scripts/build_k04_matrix.sh
@@ -65,4 +65,10 @@ Every push builds all devices in parallel via GitHub Actions. UF2 artifacts avai
 Based on [RMK](https://github.com/HaoboGu/rmk) 0.8.2 with nRF52840 BLE support.
 
 The root `rmk`, `rmk-macro`, `rmk-types`, and `rmk-config` crates are the
-current source of truth for all firmware targets in this repository.
+current source of truth for firmware targets in this repository. K:04 currently
+has two explicitly named connection paths:
+
+- `common`: ordinary no-Qube `keyboards/k04`, using the stable
+  `common/rmk-common-k04` stack.
+- `qube`: `keyboards/k04_qube`, using the root RMK crates for the Qube dongle
+  connection path.

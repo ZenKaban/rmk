@@ -4,10 +4,10 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-export RUST_MIN_STACK="${RUST_MIN_STACK:-16777216}"
+export RUST_MIN_STACK="${RUST_MIN_STACK:-33554432}"
 
 if [[ -z "${BINDGEN_EXTRA_CLANG_ARGS:-}" ]]; then
-    clang_args=(--target=arm-none-eabi)
+    clang_args=(-ffreestanding --target=arm-none-eabi)
 
     if command -v arm-none-eabi-gcc >/dev/null 2>&1; then
         sysroot="$(arm-none-eabi-gcc -print-sysroot 2>/dev/null || true)"
@@ -49,6 +49,11 @@ if [[ -z "${BINDGEN_EXTRA_CLANG_ARGS:-}" ]]; then
                 clang_args+=("-I$gcc_include")
             fi
         fi
+    fi
+
+    host_gcc_include="$(gcc -print-file-name=include 2>/dev/null || true)"
+    if [[ -n "$host_gcc_include" && -d "$host_gcc_include" ]]; then
+        clang_args+=("-I$host_gcc_include")
     fi
 
     export BINDGEN_EXTRA_CLANG_ARGS="${clang_args[*]}"

@@ -60,7 +60,7 @@ impl ErgohavenUserKeys {
             return;
         };
 
-        let ble_id = legacy_k04_ble_id(id).unwrap_or(id);
+        let ble_id = k04_common_ble_id(id).unwrap_or(id);
         if event.keyboard_event.pressed {
             if ble_id == USER_BT_CLEAR_PEER {
                 self.arm_clear_peer(event.keyboard_event);
@@ -146,7 +146,7 @@ impl ErgohavenUserKeys {
     }
 }
 
-fn legacy_k04_ble_id(id: u8) -> Option<u8> {
+fn k04_common_ble_id(id: u8) -> Option<u8> {
     match id {
         K04_USER_BT_PROFILE0 => Some(0),
         K04_USER_BT_PROFILE1 => Some(1),
