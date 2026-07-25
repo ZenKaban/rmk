@@ -45,7 +45,7 @@ keys = """
 Escape  Q     W     E     R     T     Y     U     I     O     P     Backspace
 Tab     A     S     D     F     G     H     J     K     L     Semicolon  Backslash
 LShift  Z     X     C     V     B     _     _     N     M     Comma  Dot  Quote  RShift
-Grave   LGui  LCtrl MO(1) Space Enter MO(2) LAlt  LeftBracket RightBracket
+Grave   LGui  LCtrl LT(1, Backspace, FH) Space Enter LT(2, Space, FH) LAlt  LeftBracket RightBracket
 """
 # encoders: [central_A1/B1, peripheral_A1/B1]
 encoders = [["AudioVolUp","AudioVolDown"],["AudioVolUp","AudioVolDown"]]
@@ -166,3 +166,15 @@ clear_storage = false
 # Preserve the Vial/Entropy keymap. Use settings_reset once when changing
 # between K:04 Series profiles.
 clear_layout = false
+
+[behavior.morse]
+enable_flow_tap = true
+prior_idle_time = "50ms"
+unilateral_tap = false
+hold_on_other_press = false
+hold_timeout = "220ms"
+gap_timeout = "220ms"
+
+[behavior.morse.profiles]
+HRM = { permissive_hold = true, hold_timeout = "150ms", gap_timeout = "150ms" }
+FH = { enable_flow_tap = false, hold_on_other_press = true, hold_timeout = "150ms", gap_timeout = "150ms" }
