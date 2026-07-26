@@ -2,6 +2,9 @@
     "name": "Ergohaven K:04 Mini",
     "vendorId": "0xE126",
     "productId": "0x0075",
+    "entropy": {
+        "batteryHalves": true
+    },
     "firmware": {
         "version": "0.1.2"
     },

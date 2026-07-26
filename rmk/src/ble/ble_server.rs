@@ -1,52 +1,20 @@
 use trouble_host::prelude::*;
-use usbd_hid::descriptor::{AsInputReport, SerializedDescriptor};
+use usbd_hid::descriptor::AsInputReport;
+#[cfg(not(feature = "host"))]
+use usbd_hid::descriptor::SerializedDescriptor;
 
 use super::battery_service::BatteryService;
 use super::device_info::DeviceConfigurationService;
+#[cfg(not(feature = "host"))]
+use crate::hid::BleCompositeReport;
 #[cfg(feature = "host")]
-use crate::hid::ViaReport;
-use crate::hid::{BleCompositeReport, CompositeReportType, HidError, HidWriterTrait, Report};
+use crate::hid::{BLE_REPORT_MAP_LEN, ble_report_map};
+use crate::hid::{CompositeReportType, HidError, HidWriterTrait, Report};
 
 // Used for saving the client attribute (CCCD) table. Tracks the trouble-host
 // per-connection client-specific attribute buffer size.
 pub(crate) const CCCD_TABLE_SIZE: usize = trouble_host::config::CLIENT_ATT_TABLE_SIZE;
 
-// `gatt_server` compiles every member regardless of the surrounding `cfg` —
-// gating an individual field with `#[cfg(feature = "host")]` doesn't work. So
-// the whole struct is duplicated, with and without `host_service`.
-#[cfg(feature = "host")]
-#[gatt_server]
-pub(crate) struct Server {
-    pub(crate) battery_service: BatteryService,
-    pub(crate) hid_service: HidService,
-    pub(crate) host_service: VialService,
-    pub(crate) device_config_service: DeviceConfigurationService,
-}
-
-/// GATT service exposing the Vial-over-HID protocol. The keyboard writes replies via
-/// `input_data` notify; hosts push requests through `output_data`. `gatt_events_task`
-/// forwards `output_data` writes into `HOST_REQUEST_CHANNEL`, and `host::run_ble_host`
-/// drains `HOST_BLE_REPLY` to notify `input_data`.
-#[cfg(feature = "host")]
-#[gatt_service(uuid = service::HUMAN_INTERFACE_DEVICE)]
-pub(crate) struct VialService {
-    #[characteristic(uuid = "2a4a", read, value = [0x01, 0x01, 0x00, 0x03])]
-    pub(crate) hid_info: [u8; 4],
-    #[characteristic(uuid = "2a4b", read, value = ViaReport::desc().try_into().expect("Failed to convert ViaReport to [u8; 27]"))]
-    pub(crate) report_map: [u8; 27],
-    #[characteristic(uuid = "2a4c", write_without_response)]
-    pub(crate) hid_control_point: u8,
-    #[characteristic(uuid = "2a4e", read, write_without_response, value = 1)]
-    pub(crate) protocol_mode: u8,
-    #[descriptor(uuid = "2908", read, value = [0u8, 1u8])]
-    #[characteristic(uuid = "2a4d", read, notify)]
-    pub(crate) input_data: [u8; 32],
-    #[descriptor(uuid = "2908", read, value = [0u8, 2u8])]
-    #[characteristic(uuid = "2a4d", read, write, write_without_response)]
-    pub(crate) output_data: [u8; 32],
-}
-
-#[cfg(not(feature = "host"))]
 #[gatt_server]
 pub(crate) struct Server {
     pub(crate) battery_service: BatteryService,
@@ -55,9 +23,50 @@ pub(crate) struct Server {
 }
 
 /// The single HID service carrying all reports, distinguished by report id via
+/// each characteristic's Report Reference descriptor.
+///
+/// Platform HID hosts are not consistent when a peripheral exposes multiple
+/// HOGP service instances, so Vial must live in this same service alongside the
+/// keyboard, mouse, media, and system reports.
+#[cfg(feature = "host")]
+#[gatt_service(uuid = service::HUMAN_INTERFACE_DEVICE)]
+pub(crate) struct HidService {
+    #[characteristic(uuid = "2a4a", read, value = [0x01, 0x01, 0x00, 0x03])]
+    pub(crate) hid_info: [u8; 4],
+    #[characteristic(uuid = "2a4b", read, value = ble_report_map())]
+    pub(crate) report_map: [u8; BLE_REPORT_MAP_LEN],
+    #[characteristic(uuid = "2a4c", write_without_response)]
+    pub(crate) hid_control_point: u8,
+    #[characteristic(uuid = "2a4e", read, write_without_response, value = 1)]
+    pub(crate) protocol_mode: u8,
+    #[descriptor(uuid = "2908", read, value = [CompositeReportType::Keyboard as u8, 1u8])]
+    #[characteristic(uuid = "2a4d", read, notify)]
+    pub(crate) input_keyboard: [u8; 8],
+    #[descriptor(uuid = "2908", read, value = [CompositeReportType::Keyboard as u8, 2u8])]
+    #[characteristic(uuid = "2a4d", read, write, write_without_response)]
+    pub(crate) output_keyboard: [u8; 1],
+    #[descriptor(uuid = "2908", read, value = [CompositeReportType::Mouse as u8, 1u8])]
+    #[characteristic(uuid = "2a4d", read, notify)]
+    pub(crate) mouse_report: [u8; 5],
+    #[descriptor(uuid = "2908", read, value = [CompositeReportType::Media as u8, 1u8])]
+    #[characteristic(uuid = "2a4d", read, notify)]
+    pub(crate) media_report: [u8; 2],
+    #[descriptor(uuid = "2908", read, value = [CompositeReportType::System as u8, 1u8])]
+    #[characteristic(uuid = "2a4d", read, notify)]
+    pub(crate) system_report: [u8; 1],
+    #[descriptor(uuid = "2908", read, value = [CompositeReportType::Vial as u8, 1u8])]
+    #[characteristic(uuid = "2a4d", read, notify)]
+    pub(crate) vial_input: [u8; 32],
+    #[descriptor(uuid = "2908", read, value = [CompositeReportType::Vial as u8, 2u8])]
+    #[characteristic(uuid = "2a4d", read, write, write_without_response)]
+    pub(crate) vial_output: [u8; 32],
+}
+
+/// The single HID service carrying all reports, distinguished by report id via
 /// each characteristic's Report Reference descriptor. Android's HID host only
 /// attaches to the first HID service instance, so the reports must not be
 /// spread over multiple service instances.
+#[cfg(not(feature = "host"))]
 #[gatt_service(uuid = service::HUMAN_INTERFACE_DEVICE)]
 pub(crate) struct HidService {
     #[characteristic(uuid = "2a4a", read, value = [0x01, 0x01, 0x00, 0x03])]

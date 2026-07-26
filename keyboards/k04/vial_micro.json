@@ -2,6 +2,9 @@
     "name": "Ergohaven K:04 Micro",
     "vendorId": "0xE126",
     "productId": "0x0076",
+    "entropy": {
+        "batteryHalves": true
+    },
     "firmware": {
         "version": "0.1.2"
     },

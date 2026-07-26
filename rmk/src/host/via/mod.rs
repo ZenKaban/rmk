@@ -1,5 +1,6 @@
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use embassy_time::Instant;
+use rmk_types::battery::BatteryStatus;
 use rmk_types::protocol::vial::{VIA_FIRMWARE_VERSION, VIA_PROTOCOL_VERSION, ViaCommand, ViaKeyboardInfo};
 use vial::process_vial;
 
@@ -61,6 +62,19 @@ fn battery_level_byte(status: rmk_types::battery::BatteryStatus) -> Option<u8> {
     match status {
         rmk_types::battery::BatteryStatus::Available { level: Some(level), .. } if level <= 100 => Some(level),
         _ => None,
+    }
+}
+
+fn battery_halves_for_split(
+    central: BatteryStatus,
+    peripheral_0: BatteryStatus,
+    peripheral_1: BatteryStatus,
+    peripheral_count: usize,
+) -> (BatteryStatus, BatteryStatus) {
+    if peripheral_count == 1 {
+        (central, peripheral_0)
+    } else {
+        (peripheral_0, peripheral_1)
     }
 }
 
@@ -181,11 +195,17 @@ impl<'a> VialService<'a> {
 
                     #[cfg(all(feature = "split", feature = "_ble"))]
                     {
-                        if let Some(level) = battery_level_byte(self.ctx.peripheral_battery_status(0)) {
+                        let (left, right) = battery_halves_for_split(
+                            self.ctx.battery_status(),
+                            self.ctx.peripheral_battery_status(0),
+                            self.ctx.peripheral_battery_status(1),
+                            crate::SPLIT_PERIPHERALS_NUM,
+                        );
+                        if let Some(level) = battery_level_byte(left) {
                             report.input_data[4] |= 0x01;
                             report.input_data[5] = level;
                         }
-                        if let Some(level) = battery_level_byte(self.ctx.peripheral_battery_status(1)) {
+                        if let Some(level) = battery_level_byte(right) {
                             report.input_data[4] |= 0x02;
                             report.input_data[6] = level;
                         }
@@ -331,6 +351,7 @@ impl Runnable for VialService<'_> {
 mod tests {
     use embassy_futures::block_on;
     use rmk_types::action::KeyAction;
+    use rmk_types::battery::ChargeState;
 
     use super::*;
     use crate::config::{BehaviorConfig, PositionalConfig};
@@ -381,5 +402,28 @@ mod tests {
             block_on(service.process_via_packet(&mut report));
             assert_eq!(report.input_data[0], 0xFF);
         });
+    }
+
+    fn battery(level: u8) -> BatteryStatus {
+        BatteryStatus::Available {
+            charge_state: ChargeState::Unknown,
+            level: Some(level),
+        }
+    }
+
+    #[test]
+    fn no_qube_split_uses_central_and_first_peripheral_batteries() {
+        assert_eq!(
+            battery_halves_for_split(battery(80), battery(55), BatteryStatus::Unavailable, 1),
+            (battery(80), battery(55))
+        );
+    }
+
+    #[test]
+    fn qube_split_uses_both_peripheral_batteries() {
+        assert_eq!(
+            battery_halves_for_split(battery(100), battery(80), battery(55), 2),
+            (battery(80), battery(55))
+        );
     }
 }

@@ -58,9 +58,33 @@ pub struct ViaReport {
     pub(crate) output_data: [u8; 32],
 }
 
+/// BLE-only Vial report descriptor.
+///
+/// USB keeps the standard unnumbered Vial interface above. The composite BLE
+/// HID service must number every report, otherwise Linux interprets the first
+/// Vial payload byte as another report's id.
+#[cfg(all(feature = "_ble", feature = "host"))]
+#[gen_hid_descriptor(
+    (collection = APPLICATION, usage_page = 0xFF60, usage = 0x61) = {
+        (report_id = 0x05,) = {
+            (usage = 0x62, logical_min = 0x0) = {
+                #[item_settings(data,variable,absolute)] input_data=input;
+            };
+            (usage = 0x63, logical_min = 0x0) = {
+                #[item_settings(data,variable,absolute)] output_data=output;
+            };
+        };
+    }
+)]
+#[derive(Default)]
+pub struct BleViaReport {
+    pub(crate) input_data: [u8; 32],
+    pub(crate) output_data: [u8; 32],
+}
+
 /// Predefined report ids for composite hid report.
 /// Should be same with `#[gen_hid_descriptor]` of `CompositeReport` and `BleCompositeReport`
-/// DO NOT EDIT
+/// and the Report Reference descriptors in `ble::ble_server::HidService`.
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 
@@ -73,6 +97,7 @@ pub enum CompositeReportType {
     Mouse = 0x02,
     Media = 0x03,
     System = 0x04,
+    Vial = 0x05,
 }
 
 /// Plover HID stenography report.
@@ -280,11 +305,35 @@ pub struct BleCompositeReport {
     pub(crate) system_usage_id: u8,
 }
 
+#[cfg(all(feature = "_ble", feature = "host"))]
+pub(crate) const BLE_REPORT_MAP_LEN: usize = 207;
+
+/// Compose the one HID-over-GATT report map used by BLE hosts.
+///
+/// Keeping Vial in this same service avoids the platform-dependent behavior of
+/// multiple HOGP service instances. USB keeps its existing dedicated,
+/// unnumbered Vial interface. BLE assigns Vial report id 5 so the entire
+/// composite report map follows the HID requirement that report id 0 cannot be
+/// mixed with numbered reports.
+#[cfg(all(feature = "_ble", feature = "host"))]
+pub(crate) fn ble_report_map() -> [u8; BLE_REPORT_MAP_LEN] {
+    let composite = BleCompositeReport::desc();
+    let vial = BleViaReport::desc();
+    assert_eq!(composite.len() + vial.len(), BLE_REPORT_MAP_LEN);
+
+    let mut report_map = [0u8; BLE_REPORT_MAP_LEN];
+    report_map[..vial.len()].copy_from_slice(vial);
+    report_map[vial.len()..].copy_from_slice(composite);
+    report_map
+}
+
 #[cfg(all(test, feature = "_ble"))]
 mod ble_report_map_tests {
     use usbd_hid::descriptor::SerializedDescriptor;
 
     use super::BleCompositeReport;
+    #[cfg(feature = "host")]
+    use super::{BLE_REPORT_MAP_LEN, BleViaReport, CompositeReportType, ble_report_map};
 
     /// Pins the report map: `ble_server::HidService` hardcodes its length, and
     /// the report ids must match `CompositeReportType`.
@@ -302,6 +351,28 @@ mod ble_report_map_tests {
                 assert!(keyboard < id, "keyboard collection must own ReportID 1");
             }
         }
+    }
+
+    #[cfg(feature = "host")]
+    #[test]
+    fn host_ble_report_map_includes_vial_in_the_composite_service() {
+        let desc = ble_report_map();
+        fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+            haystack.windows(needle.len()).position(|w| w == needle)
+        }
+
+        assert_eq!(desc.len(), BLE_REPORT_MAP_LEN);
+        let vial_usage = find(&desc, &[0x06, 0x60, 0xff, 0x09, 0x61]).expect("missing Vial application usage");
+        let vial_report_id = find(&desc, &[0x85, CompositeReportType::Vial as u8]).expect("missing Vial ReportID");
+        assert!(
+            vial_usage < vial_report_id,
+            "Vial application collection must own ReportID 5"
+        );
+        assert_eq!(BleViaReport::desc().len(), 29);
+        assert!(
+            !desc.windows(2).any(|item| item == [0x85, 0x00]),
+            "ReportID 0 is reserved"
+        );
     }
 }
 

@@ -14,7 +14,7 @@ use crate::RawMutex;
 use crate::event::BatteryStatusEvent;
 use crate::event::{BatteryAdcEvent, ChargingStateEvent, publish_event};
 
-/// Cached battery status, updated by [`BatteryProcessor::commit`] alongside every
+/// Cached battery status, updated by [`publish_battery_status`] alongside every
 /// [`BatteryStatusEvent`] publish so host services can read the current value
 /// synchronously without subscribing to the event stream.
 #[cfg(feature = "_ble")]
@@ -24,6 +24,17 @@ pub(crate) static BATTERY_STATUS: Mutex<RawMutex, Cell<BatteryStatus>> =
 #[cfg(feature = "_ble")]
 pub(crate) fn current_battery_status() -> BatteryStatus {
     BATTERY_STATUS.lock(|c| c.get())
+}
+
+/// Cache and broadcast a battery status reported by a battery input device.
+///
+/// Custom battery readers should use this function instead of publishing a
+/// [`BatteryStatusEvent`] directly so synchronous host services observe the
+/// same status as event subscribers.
+#[cfg(feature = "_ble")]
+pub fn publish_battery_status(status: BatteryStatus) {
+    BATTERY_STATUS.lock(|c| c.set(status));
+    publish_event(BatteryStatusEvent::from(status));
 }
 
 /// Reads charging state from a GPIO pin and publishes ChargingStateEvent.
@@ -118,8 +129,7 @@ impl BatteryProcessor {
     #[cfg(feature = "_ble")]
     fn commit(&mut self, status: BatteryStatus) {
         self.battery_status = status;
-        BATTERY_STATUS.lock(|c| c.set(status));
-        publish_event(BatteryStatusEvent::from(status));
+        publish_battery_status(status);
     }
 
     #[cfg(feature = "_ble")]
@@ -156,6 +166,23 @@ impl BatteryProcessor {
         } else {
             ((val * total / measured - 4055) / 7) as u8
         }
+    }
+}
+
+#[cfg(all(test, feature = "_ble"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn published_battery_status_is_available_to_sync_readers() {
+        let status = BatteryStatus::Available {
+            charge_state: ChargeState::Discharging,
+            level: Some(73),
+        };
+
+        publish_battery_status(status);
+
+        assert_eq!(current_battery_status(), status);
     }
 }
 
