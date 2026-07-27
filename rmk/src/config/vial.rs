@@ -86,13 +86,28 @@ pub struct VialDeviceSettings<'a> {
     pub deserialize: fn(&[u8]),
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct VialConfig<'a> {
     pub vial_keyboard_id: &'a [u8],
     pub vial_keyboard_def: &'a [u8],
     pub unlock_keys: &'a [(u8, u8)],
     pub device_settings: Option<VialDeviceSettings<'a>>,
     pub vial_insecure: bool,
+    /// Runtime firmware version returned by VIA `id_firmware_version`.
+    pub firmware_version: u32,
+}
+
+impl Default for VialConfig<'_> {
+    fn default() -> Self {
+        Self {
+            vial_keyboard_id: &[],
+            vial_keyboard_def: &[],
+            unlock_keys: &[],
+            device_settings: None,
+            vial_insecure: false,
+            firmware_version: rmk_types::protocol::vial::VIA_FIRMWARE_VERSION,
+        }
+    }
 }
 
 impl<'a> VialConfig<'a> {
@@ -103,6 +118,7 @@ impl<'a> VialConfig<'a> {
             unlock_keys,
             device_settings: None,
             vial_insecure: false,
+            firmware_version: rmk_types::protocol::vial::VIA_FIRMWARE_VERSION,
         }
     }
 }

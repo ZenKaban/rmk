@@ -3,8 +3,11 @@
 
 mod battery_nrf;
 mod layer_led;
+#[path = "../../k04/src/module_settings.rs"]
 mod module_settings;
+#[path = "../../k04/src/touchpad.rs"]
 mod touchpad;
+#[path = "../../k04/src/trackball.rs"]
 mod trackball;
 
 use rmk::macros::rmk_peripheral;
@@ -38,7 +41,7 @@ mod keyboard_peripheral {
         )
     }
 
-    #[register_processor(poll)]
+    #[register_processor(event)]
     fn touchpad() -> crate::touchpad::Touchpad {
         static TOUCH_TWIM_TX_BUF: ::static_cell::StaticCell<[u8; 4]> = ::static_cell::StaticCell::new();
         let mut config = ::embassy_nrf::twim::Config::default();

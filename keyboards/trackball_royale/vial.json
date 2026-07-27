@@ -1,11 +1,12 @@
 {
     "name": "Ergohaven Trackball Royale",
+    "manufacturer": "Ergohaven",
     "vendorId": "0xE126",
     "productId": "0x00C3",
     "firmware": {
-        "version": "0.1.2"
+        "version": "0.1.3"
     },
-    "firmwareVersion": "0.1.2",
+    "firmwareVersion": "0.1.3",
     "lighting": "none",
     "matrix": {
         "rows": 3,

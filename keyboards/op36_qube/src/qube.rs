@@ -1,7 +1,7 @@
 #![no_main]
 #![no_std]
 
-//! OP36 Qube dongle — USB HID central + ST7789 status screen.
+//! Ergohaven Qube dongle — USB HID central + ST7789 status screen.
 //!
 //! Build: `cargo make uf2-qube`
 

@@ -1,7 +1,7 @@
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use embassy_time::Instant;
 use rmk_types::battery::BatteryStatus;
-use rmk_types::protocol::vial::{VIA_FIRMWARE_VERSION, VIA_PROTOCOL_VERSION, ViaCommand, ViaKeyboardInfo};
+use rmk_types::protocol::vial::{VIA_PROTOCOL_VERSION, ViaCommand, ViaKeyboardInfo};
 use vial::process_vial;
 
 use crate::channel::{HOST_REQUEST_CHANNEL, try_send_host_reply};
@@ -129,7 +129,7 @@ impl<'a> VialService<'a> {
                             self.ctx.read_matrix_state(&mut report.input_data[2..]);
                         }
                         ViaKeyboardInfo::FirmwareVersion => {
-                            BigEndian::write_u32(&mut report.input_data[2..6], VIA_FIRMWARE_VERSION);
+                            BigEndian::write_u32(&mut report.input_data[2..6], self.vial_config.firmware_version);
                         }
                         _ => (),
                     },
@@ -380,6 +380,34 @@ mod tests {
             input_data: output_data,
             output_data,
         }
+    }
+
+    #[test]
+    fn reports_the_configured_runtime_firmware_version() {
+        let mut data = KeymapData::new([[[KeyAction::No]]]);
+        let mut behavior = BehaviorConfig::default();
+        let positional = PositionalConfig::<1, 1>::default();
+        let keymap = block_on(KeyMap::new(&mut data, &mut behavior, &positional));
+        let ctx = KeyboardContext::new(&keymap);
+        let config = RmkConfig {
+            vial_config: VialConfig {
+                firmware_version: 0x0000_0103,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut service = VialService::new(&ctx, &config);
+        let mut output_data = [0u8; 32];
+        output_data[0] = ViaCommand::GetKeyboardValue as u8;
+        output_data[1] = ViaKeyboardInfo::FirmwareVersion as u8;
+        let mut report = ViaReport {
+            input_data: output_data,
+            output_data,
+        };
+
+        block_on(service.process_via_packet(&mut report));
+
+        assert_eq!(&report.input_data[2..6], &[0x00, 0x00, 0x01, 0x03]);
     }
 
     // `output_data` is [u8; 32], so the handler slices `output_data[4..4 + size]`.

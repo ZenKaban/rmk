@@ -14,7 +14,9 @@ use crate::module_settings;
 const FAST_PROBE_INTERVAL: Duration = Duration::from_millis(250);
 const SLOW_PROBE_INTERVAL: Duration = Duration::from_secs(2);
 const FAST_PROBE_WINDOW: Duration = Duration::from_secs(10);
-const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+// MOTION wakes the task immediately. A connected sensor only needs a sparse
+// identity check; reading its registers every second prevents deep rest.
+const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 const REPORT_INTERVAL: Duration = Duration::from_millis(12);
 const MOTION_ACCUM_LIMIT: i32 = (i8::MAX as i32) * 2;
 const DEFAULT_CPI: u16 = 1000;

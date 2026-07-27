@@ -38,7 +38,7 @@ mod keyboard_peripheral {
         )
     }
 
-    #[register_processor(poll)]
+    #[register_processor(event)]
     fn touchpad() -> crate::touchpad::Touchpad {
         static TOUCH_TWIM_TX_BUF: ::static_cell::StaticCell<[u8; 4]> = ::static_cell::StaticCell::new();
         let mut config = ::embassy_nrf::twim::Config::default();

@@ -98,6 +98,8 @@ action.subs = 2
 keyboard.subs = 4
 peripheral_battery.pubs = 2
 peripheral_battery.subs = 4
+# One settings update publishes base, BT profile, and encoder packets together.
+peripheral_settings.channel_size = 3
 layer_change.channel_size = 4
 layer_change.subs = 6
 modifier.channel_size = 8

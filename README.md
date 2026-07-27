@@ -13,7 +13,7 @@ RMK BLE split firmware for Ergohaven keyboards and trackballs (nRF52840).
 | K:04 Series + Qube | K:04 / Mini / Micro | 1+1 | Qube dongle + ST7789 |
 | Imperial44  | 4×6 + 3 thumb  | 1+1      | —         |
 | OP36        | 3×5 + 3 thumb  | —        | —         |
-| OP36 Qube   | 3×5 + 3 thumb  | —        | Qube dongle + ST7789 |
+| Classic splits + Qube | K:03 / Velvet / Imperial44 / OP36 | model-specific | Qube dongle + ST7789 |
 | Velvet      | 4×6 + 5 thumb  | —        | —         |
 | Velvet UI   | 4×6 + 5 thumb  | —        | PMW3610   |
 
@@ -58,6 +58,12 @@ Flash `settings_reset.uf2` to erase all saved keymap/BLE data, then re-flash key
 ## CI
 
 Every push builds all devices in parallel via GitHub Actions. UF2 artifacts available as build downloads.
+
+## Releases
+
+Packaged UF2 firmware is published on the
+[GitHub Releases](https://github.com/ergohaven/rmk/releases) page. The current
+firmware release is `v0.1.3`.
 
 ## RMK Version
 

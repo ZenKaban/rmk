@@ -1,11 +1,12 @@
 {
     "name": "Ergohaven Imperial44",
+    "manufacturer": "Ergohaven",
     "vendorId": "0xE126",
     "productId": "0x0044",
     "firmware": {
-        "version": "0.1.2"
+        "version": "0.1.3"
     },
-    "firmwareVersion": "0.1.2",
+    "firmwareVersion": "0.1.3",
     "lighting": "none",
     "matrix": {
         "rows": 8,

@@ -212,6 +212,18 @@ jobs:
             output_name: op36_qube
             keyboard_toml: keyboard.toml
             vial_json: vial.json
+          - keyboard: op36_qube
+            output_name: k03_qube
+            keyboard_toml: keyboard_k03.toml
+            vial_json: ../k03/vial.json
+          - keyboard: op36_qube
+            output_name: velvet_qube
+            keyboard_toml: keyboard_velvet.toml
+            vial_json: ../velvet/vial.json
+          - keyboard: op36_qube
+            output_name: imperial44_qube
+            keyboard_toml: keyboard_imperial44.toml
+            vial_json: ../imperial44/vial.json
           - keyboard: k04_qube
             output_name: k04_qube_k04
             keyboard_toml: keyboard.toml

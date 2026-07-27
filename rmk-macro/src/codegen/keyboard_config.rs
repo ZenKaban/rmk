@@ -47,6 +47,16 @@ pub(crate) fn expand_vial_config(host: &Host) -> proc_macro2::TokenStream {
     if !host.vial_enabled {
         return quote! {};
     }
+    let firmware_version = std::env::var("RMK_FIRMWARE_VERSION")
+        .ok()
+        .map(|value| {
+            parse_firmware_version(&value).unwrap_or_else(|| {
+                panic!(
+                    "RMK_FIRMWARE_VERSION must be major.minor.patch with minor and patch in 0..=255, got {value:?}"
+                )
+            })
+        })
+        .unwrap_or(rmk_types::protocol::vial::VIA_FIRMWARE_VERSION);
     let unlock_keys = if !host.unlock_keys.is_empty() {
         let keys_expr = host
             .unlock_keys
@@ -75,6 +85,36 @@ pub(crate) fn expand_vial_config(host: &Host) -> proc_macro2::TokenStream {
             unlock_keys: #unlock_keys,
             device_settings: #device_settings,
             vial_insecure: #vial_insecure,
+            firmware_version: #firmware_version,
         };
+    }
+}
+
+fn parse_firmware_version(value: &str) -> Option<u32> {
+    let mut components = value.trim().split('.');
+    let major = components.next()?.parse::<u16>().ok()?;
+    let minor = components.next()?.parse::<u8>().ok()?;
+    let patch = components.next()?.parse::<u8>().ok()?;
+    if components.next().is_some() {
+        return None;
+    }
+    Some((u32::from(major) << 16) | (u32::from(minor) << 8) | u32::from(patch))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_firmware_version;
+
+    #[test]
+    fn parses_via_runtime_firmware_version() {
+        assert_eq!(parse_firmware_version("0.1.3"), Some(0x0000_0103));
+        assert_eq!(parse_firmware_version("12.34.56"), Some(0x000C_2238));
+    }
+
+    #[test]
+    fn rejects_invalid_runtime_firmware_versions() {
+        assert_eq!(parse_firmware_version("0.1"), None);
+        assert_eq!(parse_firmware_version("0.1.256"), None);
+        assert_eq!(parse_firmware_version("0.1.3.4"), None);
     }
 }

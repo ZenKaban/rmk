@@ -1,5 +1,6 @@
 {
     "name": "Ergohaven K:04",
+    "manufacturer": "Ergohaven",
     "vendorId": "0xE126",
     "productId": "0x0071",
     "entropy": {
@@ -7,9 +8,9 @@
         "batteryHalves": true
     },
     "firmware": {
-        "version": "0.1.2"
+        "version": "0.1.3"
     },
-    "firmwareVersion": "0.1.2",
+    "firmwareVersion": "0.1.3",
     "lighting": "none",
     "matrix": {
         "rows": 10,

@@ -546,7 +546,10 @@ fn sleeping_central_conn_param() -> RequestedConnParams {
     RequestedConnParams {
         min_connection_interval: Duration::from_millis(200),
         max_connection_interval: Duration::from_millis(200),
-        max_latency: 25, // 5s
+        // A sleeping peripheral must still attend every 200ms connection
+        // event. Allowing 25 skipped events delayed the first key or pointing
+        // packet from a split peripheral by up to five seconds.
+        max_latency: 0,
         supervision_timeout: Duration::from_secs(11),
         ..Default::default()
     }
@@ -990,5 +993,14 @@ mod advertisement_tests {
             assert_eq!(desired_split_power_mode(timeout_ms, 0, false), SplitPowerMode::Sleeping);
         }
         assert_eq!(desired_split_power_mode(1, 0, true), SplitPowerMode::Sleeping);
+    }
+
+    #[test]
+    fn sleeping_split_link_bounds_first_peripheral_event_latency() {
+        let params = sleeping_central_conn_param();
+
+        assert_eq!(params.min_connection_interval, Duration::from_millis(200));
+        assert_eq!(params.max_connection_interval, Duration::from_millis(200));
+        assert_eq!(params.max_latency, 0);
     }
 }

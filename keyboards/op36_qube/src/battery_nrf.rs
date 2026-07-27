@@ -1,4 +1,4 @@
-//! OP36 battery (ZMK op36.dtsi: AIN7/P0_31, 1564k/2370k).
+//! Ergohaven split battery reader for AIN7/P0_31, 1564k/2370k.
 //!
 //! Stock RMK `battery_adc_pin` is not used: its NrfAdc path calls
 //! `calibrate().await`, which can hang under SoftDevice and leave the dongle
@@ -38,11 +38,11 @@ fn percent(val: u16) -> u8 {
     }
 }
 
-pub struct Op36Battery {
+pub struct SplitBattery {
     saadc: Saadc<'static, 1>,
 }
 
-impl Op36Battery {
+impl SplitBattery {
     pub fn new(saadc: Peri<'static, SAADC>, pin: Peri<'static, P0_31>) -> Self {
         interrupt::SAADC.set_priority(interrupt::Priority::P3);
         let channel = saadc::ChannelConfig::single_ended(pin.degrade_saadc());
@@ -78,7 +78,7 @@ impl EventSubscriber for NeverSub {
     }
 }
 
-impl Runnable for Op36Battery {
+impl Runnable for SplitBattery {
     async fn run(&mut self) -> ! {
         Timer::after(Duration::from_millis(1000)).await;
         let mut refresh_sub = PeripheralBatteryRefreshEvent::subscriber();
@@ -93,7 +93,7 @@ impl Runnable for Op36Battery {
     }
 }
 
-impl Processor for Op36Battery {
+impl Processor for SplitBattery {
     type Event = NeverEvent;
     fn subscriber() -> impl EventSubscriber<Event = NeverEvent> {
         NeverSub

@@ -6,8 +6,8 @@ use std::{env, fs};
 use xz2::read::XzEncoder;
 
 fn main() {
-    const FIRMWARE_VERSION: &str = "0.1.2";
-    const FIRMWARE_VERSION_BCD: &str = "0x0102";
+    const FIRMWARE_VERSION: &str = "0.1.3";
+    const FIRMWARE_VERSION_BCD: &str = "0x0103";
 
     let vial_path = configured_path("VIAL_JSON_PATH", "vial.json");
     let keyboard_path = configured_path("KEYBOARD_TOML_PATH", "keyboard.toml");

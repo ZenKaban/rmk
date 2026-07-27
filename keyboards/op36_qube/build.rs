@@ -18,22 +18,27 @@ use std::{env, fs};
 use xz2::read::XzEncoder;
 
 fn main() {
-    const FIRMWARE_VERSION: &str = "0.1.2";
-    const FIRMWARE_VERSION_BCD: &str = "0x0102";
+    const FIRMWARE_VERSION: &str = "0.1.3";
+    const FIRMWARE_VERSION_BCD: &str = "0x0103";
 
-    // Generate vial config at the root of project
-    println!("cargo:rerun-if-changed=vial.json");
-    println!("cargo:rerun-if-changed=keyboard.toml");
+    let vial_path = configured_path("VIAL_JSON_PATH", "vial.json");
+    let keyboard_path = configured_path("KEYBOARD_TOML_PATH", "keyboard.toml");
+
+    println!("cargo:rerun-if-env-changed=VIAL_JSON_PATH");
+    println!("cargo:rerun-if-env-changed=KEYBOARD_TOML_PATH");
+    println!("cargo:rerun-if-changed={}", vial_path.display());
+    println!("cargo:rerun-if-changed={}", keyboard_path.display());
     println!("cargo:rerun-if-changed=memory_halves.x");
     println!("cargo:rerun-if-changed=memory_qube.x");
     println!("cargo:rustc-env=RMK_FIRMWARE_VERSION={FIRMWARE_VERSION}");
     println!("cargo:rustc-env=RMK_FIRMWARE_VERSION_BCD={FIRMWARE_VERSION_BCD}");
 
-    generate_vial_config();
-
     // Put `memory.x` in our output directory and ensure it's
     // on the linker search path.
     let out = &PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    let product_id = generate_vial_config(&vial_path);
+    generate_qube_profile(product_id, out);
+
     let memory = if env::var_os("CARGO_FEATURE_QUBE").is_some() {
         include_bytes!("memory_qube.x").as_slice()
     } else {
@@ -66,21 +71,44 @@ fn main() {
     println!("cargo:rustc-linker=flip-link");
 }
 
-fn generate_vial_config() {
+fn configured_path(variable: &str, default: &str) -> PathBuf {
+    env::var_os(variable)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(default))
+}
+
+fn generate_vial_config(vial_path: &Path) -> u16 {
     // Generated vial config file
     let out_file = Path::new(&env::var_os("OUT_DIR").unwrap()).join("config_generated.rs");
 
-    let p = Path::new("vial.json");
     let mut content = String::new();
-    match File::open(p) {
+    match File::open(vial_path) {
         Ok(mut file) => {
             file.read_to_string(&mut content)
-                .expect("Cannot read vial.json");
+                .unwrap_or_else(|e| panic!("Cannot read {}: {e}", vial_path.display()));
         }
-        Err(e) => println!("Cannot find vial.json {:?}: {}", p, e),
+        Err(e) => panic!("Cannot find {}: {e}", vial_path.display()),
     };
 
-    let vial_cfg = json::stringify(json::parse(&content).unwrap());
+    let parsed =
+        json::parse(&content).unwrap_or_else(|e| panic!("Cannot parse {}: {e}", vial_path.display()));
+    let product_id = parsed["productId"]
+        .as_str()
+        .and_then(|value| value.strip_prefix("0x").or_else(|| value.strip_prefix("0X")))
+        .and_then(|value| u16::from_str_radix(value, 16).ok())
+        .unwrap_or_else(|| panic!("{} productId must be a hexadecimal string", vial_path.display()));
+    match product_id {
+        0x0036 | 0x0044 | 0x0070 | 0x00BE => {}
+        _ => panic!("Unsupported Ergohaven Qube productId: 0x{product_id:04X}"),
+    }
+
+    let mut vial_cfg = json::stringify(parsed);
+    if !vial_cfg.contains("\"entropy\"") {
+        vial_cfg.insert_str(
+            1,
+            "\"entropy\":{\"liveFeatures\":[\"time\",\"media\"],\"batteryHalves\":true},",
+        );
+    }
     let mut keyboard_def_compressed: Vec<u8> = Vec::new();
     XzEncoder::new(vial_cfg.as_bytes(), 6)
         .read_to_end(&mut keyboard_def_compressed)
@@ -94,4 +122,27 @@ fn generate_vial_config() {
     .map(|s| "#[allow(clippy::redundant_static_lifetimes)]\n".to_owned() + s.as_str())
     .join("\n");
     fs::write(out_file, const_declarations).unwrap();
+
+    product_id
+}
+
+fn generate_qube_profile(product_id: u16, out: &Path) {
+    let source = match product_id {
+        0x0036 => {
+            r#"pub const DEFAULT_LAYER_NAMES: [&str; 16] = [
+    "BASE", "GAM", "GFN", "NAV", "SYM", "NUM", "?", "?",
+    "?", "?", "?", "?", "?", "?", "?", "?",
+];
+"#
+        }
+        0x0044 | 0x0070 | 0x00BE => {
+            r#"pub const DEFAULT_LAYER_NAMES: [&str; 16] = [
+    "BASE", "NAV", "SYM", "ADJ", "?", "?", "?", "?",
+    "?", "?", "?", "?", "?", "?", "?", "?",
+];
+"#
+        }
+        _ => unreachable!(),
+    };
+    fs::write(out.join("qube_profile_generated.rs"), source).unwrap();
 }

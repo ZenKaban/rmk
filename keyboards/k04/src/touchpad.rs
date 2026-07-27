@@ -1,7 +1,8 @@
 use embassy_nrf::twim::Twim;
 use embassy_time::{Duration, Instant, Timer};
-use rmk::event::{publish_event, Axis, AxisEvent, AxisValType, LayerChangeEvent, PointingEvent};
-use rmk::macros::processor;
+use rmk::core_traits::Runnable;
+use rmk::event::{publish_event, Axis, AxisEvent, AxisValType, EventSubscriber, PointingEvent};
+use rmk::processor::Processor;
 
 use crate::module_settings;
 
@@ -16,7 +17,12 @@ const REG_SYSTEM_CONTROL_1: u16 = 0x0432;
 const REG_REPORT_RATE_ACTIVE: u16 = 0x057a;
 const REG_REPORT_RATE_IDLE_TOUCH: u16 = 0x057c;
 const REG_REPORT_RATE_IDLE: u16 = 0x057e;
+const REG_REPORT_RATE_LP1: u16 = 0x0580;
+const REG_REPORT_RATE_LP2: u16 = 0x0582;
+const REG_ACTIVE_MODE_TIMEOUT: u16 = 0x0584;
+const REG_IDLE_TOUCH_MODE_TIMEOUT: u16 = 0x0585;
 const REG_IDLE_MODE_TIMEOUT: u16 = 0x0586;
+const REG_LP1_MODE_TIMEOUT: u16 = 0x0587;
 const REG_SYSTEM_CONFIG_0: u16 = 0x058e;
 const REG_SYSTEM_CONFIG_1: u16 = 0x058f;
 const REG_XY_CONFIG_0: u16 = 0x0669;
@@ -26,14 +32,31 @@ const REG_HOLD_TIME: u16 = 0x06bd;
 const REG_SCROLL_INITIAL_DISTANCE: u16 = 0x06c8;
 const REG_END_COMMS: u16 = 0xeeee;
 
-const REPORT_RATE_MS: u16 = 15;
+const REPORT_RATE_ACTIVE_MS: u16 = 15;
+const REPORT_RATE_IDLE_TOUCH_MS: u16 = 15;
+const REPORT_RATE_IDLE_MS: u16 = 40;
+const REPORT_RATE_LP1_MS: u16 = 160;
+const REPORT_RATE_LP2_MS: u16 = 320;
+const ACTIVE_MODE_TIMEOUT_SECS: u8 = 1;
+const IDLE_TOUCH_MODE_TIMEOUT_SECS: u8 = 255;
+const IDLE_MODE_TIMEOUT_SECS: u8 = 5;
+const LP1_MODE_TIMEOUT_20_SECS: u8 = 1;
+// K:04 does not route IQS5xx RDY. Forced I2C reads can report the cadence of
+// the wake cycle, so the host must downshift from observed inactivity instead
+// of feeding PREVIOUS_CYCLE_TIME back into its own polling schedule.
+const TOUCH_ACTIVE_POLL_WINDOW: Duration = Duration::from_secs(1);
+const TOUCH_IDLE_POLL_WINDOW: Duration = Duration::from_secs(6);
+const TOUCH_LP1_POLL_WINDOW: Duration = Duration::from_secs(26);
 const TOUCH_EVENT_BLOCK_LEN: usize = 10;
-const TOUCH_FAST_PROBE_INTERVAL_MS: u32 = 500;
-const TOUCH_SLOW_PROBE_INTERVAL_MS: u32 = 2_000;
-const TOUCH_FAST_PROBE_WINDOW_MS: u32 = 10_000;
+const TOUCH_FAST_PROBE_INTERVAL: Duration = Duration::from_millis(500);
+const TOUCH_SLOW_PROBE_INTERVAL: Duration = Duration::from_secs(2);
+const TOUCH_FAST_PROBE_WINDOW: Duration = Duration::from_secs(10);
 const TOUCH_READ_FAILURE_REINIT_THRESHOLD: u8 = 4;
 const TOUCH_MOTION_ACCUM_LIMIT: i32 = (i8::MAX as i32) * 2;
-const TOUCH_REPORT_INTERVAL_MS: u32 = 16;
+const TOUCH_REPORT_INTERVAL: Duration = Duration::from_millis(16);
+const SCROLL_DIVISOR: i16 = 8;
+const BUTTON_LEFT: u8 = 1 << 0;
+const BUTTON_RIGHT: u8 = 1 << 1;
 const GESTURE_0_SINGLE_TAP: u8 = 1 << 0;
 const GESTURE_0_PRESS_AND_HOLD: u8 = 1 << 1;
 const GESTURE_1_TWO_FINGER_TAP: u8 = 1 << 0;
@@ -44,8 +67,8 @@ const SYSTEM_CONTROL_0_ACK_RESET: u8 = 1 << 7;
 const FILTER_IIR: u8 = 1 << 0;
 const FILTER_MAV: u8 = 1 << 1;
 const FILTER_ALP_COUNT: u8 = 1 << 3;
+const SYSTEM_CONTROL_1_WAKE: u8 = 0;
 
-#[processor(subscribe = [LayerChangeEvent], poll_interval = 16)]
 pub struct Touchpad {
     i2c: Twim<'static>,
     device_id: u8,
@@ -54,9 +77,12 @@ pub struct Touchpad {
     read_failures: u8,
     acc_x: i32,
     acc_y: i32,
-    last_report_ms: u32,
-    next_probe_ms: u32,
-    unavailable_since_ms: Option<u32>,
+    last_report: Instant,
+    last_activity: Instant,
+    next_probe: Instant,
+    next_poll: Instant,
+    poll_interval: Duration,
+    unavailable_since: Option<Instant>,
 }
 
 impl Touchpad {
@@ -69,54 +95,77 @@ impl Touchpad {
             read_failures: 0,
             acc_x: 0,
             acc_y: 0,
-            last_report_ms: 0,
-            next_probe_ms: 0,
-            unavailable_since_ms: None,
+            last_report: Instant::MIN,
+            last_activity: Instant::MIN,
+            next_probe: Instant::MIN,
+            next_poll: Instant::MIN,
+            poll_interval: Duration::from_millis(REPORT_RATE_ACTIVE_MS as u64),
+            unavailable_since: None,
         }
     }
 
-    async fn on_layer_change_event(&mut self, _event: LayerChangeEvent) {}
+    async fn run_loop(&mut self) -> ! {
+        loop {
+            let deadline = if self.ready { self.next_poll } else { self.next_probe };
+            Timer::at(deadline).await;
+            self.poll_once().await;
+        }
+    }
 
-    async fn poll(&mut self) {
+    async fn poll_once(&mut self) {
         if !self.ready {
-            let now = now_ms();
-            if deadline_pending(now, self.next_probe_ms) {
-                return;
-            }
-
             if !self.init().await {
-                self.schedule_next_probe(now);
-                Timer::after(Duration::from_millis(1)).await;
+                self.schedule_next_probe(Instant::now());
                 return;
             }
-            self.last_report_ms = now_ms();
+            self.last_report = Instant::now();
         }
 
-        match self.read_motion().await {
+        let active_sample = match self.read_motion().await {
             TouchReadResult::Motion { x, y } => {
                 self.read_failures = 0;
                 let x = module_settings::scale_touch_delta(x, self.side);
                 let y = module_settings::scale_touch_delta(y, self.side);
                 self.acc_x = clamp_motion_accum(self.acc_x.saturating_add(x as i32));
                 self.acc_y = clamp_motion_accum(self.acc_y.saturating_add(y as i32));
+                true
+            }
+            TouchReadResult::Gesture { buttons } => {
+                self.read_failures = 0;
+                self.send_gesture(buttons);
+                true
+            }
+            TouchReadResult::Scroll { h, v } => {
+                self.read_failures = 0;
+                self.send_scroll(h, v);
+                true
             }
             TouchReadResult::NoMotion => {
                 self.read_failures = 0;
+                false
             }
             TouchReadResult::ReadFailed => {
                 self.read_failures = self.read_failures.saturating_add(1);
                 if self.read_failures >= TOUCH_READ_FAILURE_REINIT_THRESHOLD {
                     self.reset();
                     Timer::after(Duration::from_millis(50)).await;
+                } else {
+                    self.next_poll = Instant::now() + self.poll_interval;
                 }
                 return;
             }
-        }
+        };
 
-        let now = now_ms();
-        if now.wrapping_sub(self.last_report_ms) >= TOUCH_REPORT_INTERVAL_MS {
+        let now = Instant::now();
+        if active_sample {
+            self.last_activity = now;
+        }
+        self.poll_interval = touch_poll_interval(now.duration_since(self.last_activity));
+        self.next_poll = now + self.poll_interval;
+
+        if now.duration_since(self.last_report) >= TOUCH_REPORT_INTERVAL {
             self.send_accumulated_motion();
-            self.last_report_ms = now;
+            self.last_report = now;
         }
     }
 
@@ -126,7 +175,7 @@ impl Touchpad {
             return false;
         }
 
-        let _ = self.write_u8(REG_SYSTEM_CONTROL_1, 0x80).await;
+        let _ = self.write_u8(REG_SYSTEM_CONTROL_1, SYSTEM_CONTROL_1_WAKE).await;
         let _ = self.end_session().await;
         Timer::after(Duration::from_millis(100)).await;
 
@@ -135,10 +184,19 @@ impl Touchpad {
         }
 
         let mut ok = true;
-        ok &= self.write_u16(REG_REPORT_RATE_ACTIVE, REPORT_RATE_MS).await;
-        ok &= self.write_u16(REG_REPORT_RATE_IDLE_TOUCH, REPORT_RATE_MS).await;
-        ok &= self.write_u16(REG_REPORT_RATE_IDLE, REPORT_RATE_MS).await;
-        ok &= self.write_u8(REG_IDLE_MODE_TIMEOUT, 255).await;
+        ok &= self.write_u16(REG_REPORT_RATE_ACTIVE, REPORT_RATE_ACTIVE_MS).await;
+        ok &= self
+            .write_u16(REG_REPORT_RATE_IDLE_TOUCH, REPORT_RATE_IDLE_TOUCH_MS)
+            .await;
+        ok &= self.write_u16(REG_REPORT_RATE_IDLE, REPORT_RATE_IDLE_MS).await;
+        ok &= self.write_u16(REG_REPORT_RATE_LP1, REPORT_RATE_LP1_MS).await;
+        ok &= self.write_u16(REG_REPORT_RATE_LP2, REPORT_RATE_LP2_MS).await;
+        ok &= self.write_u8(REG_ACTIVE_MODE_TIMEOUT, ACTIVE_MODE_TIMEOUT_SECS).await;
+        ok &= self
+            .write_u8(REG_IDLE_TOUCH_MODE_TIMEOUT, IDLE_TOUCH_MODE_TIMEOUT_SECS)
+            .await;
+        ok &= self.write_u8(REG_IDLE_MODE_TIMEOUT, IDLE_MODE_TIMEOUT_SECS).await;
+        ok &= self.write_u8(REG_LP1_MODE_TIMEOUT, LP1_MODE_TIMEOUT_20_SECS).await;
         ok &= self.write_u8(REG_SYSTEM_CONFIG_1, 0x46).await;
         ok &= self.write_u8(REG_BOTTOM_BETA, 5).await;
         ok &= self.write_u8(REG_STATIONARY_THRESH, 5).await;
@@ -163,8 +221,12 @@ impl Touchpad {
         if ok {
             self.ready = true;
             self.read_failures = 0;
-            self.next_probe_ms = 0;
-            self.unavailable_since_ms = None;
+            let now = Instant::now();
+            self.next_probe = Instant::MIN;
+            self.next_poll = now + Duration::from_millis(REPORT_RATE_ACTIVE_MS as u64);
+            self.poll_interval = Duration::from_millis(REPORT_RATE_ACTIVE_MS as u64);
+            self.last_activity = now;
+            self.unavailable_since = None;
             self.acc_x = 0;
             self.acc_y = 0;
         }
@@ -177,6 +239,8 @@ impl Touchpad {
             return TouchReadResult::ReadFailed;
         }
 
+        let previous_cycle_time = data[0];
+        let gesture_0 = data[1];
         let gesture_1 = data[2];
         let system_info_0 = data[3];
         let system_info_1 = data[4];
@@ -205,6 +269,24 @@ impl Touchpad {
             return TouchReadResult::ReadFailed;
         }
 
+        let gestures_enabled = module_settings::touch_gestures_enabled(self.side);
+
+        if gestures_enabled && (gesture_0 & (GESTURE_0_SINGLE_TAP | GESTURE_0_PRESS_AND_HOLD)) != 0 {
+            return TouchReadResult::Gesture { buttons: BUTTON_LEFT };
+        }
+
+        // Keep the IQS5xx/QMK guard that suppresses duplicate two-finger taps.
+        if gestures_enabled && (gesture_1 & GESTURE_1_TWO_FINGER_TAP) != 0 && previous_cycle_time != 0 {
+            return TouchReadResult::Gesture { buttons: BUTTON_RIGHT };
+        }
+
+        if gestures_enabled && ((gesture_1 & GESTURE_1_SCROLL) != 0 || (number_of_fingers >= 2 && (x != 0 || y != 0))) {
+            return match scroll_delta(x, y) {
+                Some((h, v)) => TouchReadResult::Scroll { h, v },
+                None => TouchReadResult::NoMotion,
+            };
+        }
+
         if number_of_fingers != 1 || (x == 0 && y == 0) {
             return TouchReadResult::NoMotion;
         }
@@ -216,7 +298,7 @@ impl Touchpad {
     }
 
     fn reset(&mut self) {
-        let now = now_ms();
+        let now = Instant::now();
         self.ready = false;
         self.read_failures = 0;
         self.acc_x = 0;
@@ -224,14 +306,40 @@ impl Touchpad {
         self.schedule_next_probe(now);
     }
 
-    fn schedule_next_probe(&mut self, now: u32) {
-        let unavailable_since = *self.unavailable_since_ms.get_or_insert(now);
-        let interval = if now.wrapping_sub(unavailable_since) < TOUCH_FAST_PROBE_WINDOW_MS {
-            TOUCH_FAST_PROBE_INTERVAL_MS
+    fn schedule_next_probe(&mut self, now: Instant) {
+        let unavailable_since = *self.unavailable_since.get_or_insert(now);
+        let interval = if now.duration_since(unavailable_since) < TOUCH_FAST_PROBE_WINDOW {
+            TOUCH_FAST_PROBE_INTERVAL
         } else {
-            TOUCH_SLOW_PROBE_INTERVAL_MS
+            TOUCH_SLOW_PROBE_INTERVAL
         };
-        self.next_probe_ms = now.wrapping_add(interval);
+        self.next_probe = now + interval;
+        self.next_poll = Instant::MIN;
+    }
+
+    fn send_gesture(&self, buttons: u8) {
+        // Qube reserves relative Z on touch sources for a button pulse. Keeping
+        // the signal inside PointingEvent preserves the existing split wire
+        // format, so a new central remains compatible with an RC48 peripheral.
+        publish_event(PointingEvent {
+            device_id: self.device_id,
+            axes: [
+                relative_axis(Axis::X, 0),
+                relative_axis(Axis::Y, 0),
+                relative_axis(Axis::Z, i16::from(buttons)),
+            ],
+        });
+    }
+
+    fn send_scroll(&self, h: i16, v: i16) {
+        publish_event(PointingEvent {
+            device_id: self.device_id,
+            axes: [
+                relative_axis(Axis::H, h),
+                relative_axis(Axis::V, v),
+                relative_axis(Axis::Z, 0),
+            ],
+        });
     }
 
     fn send_accumulated_motion(&mut self) {
@@ -247,21 +355,9 @@ impl Touchpad {
         publish_event(PointingEvent {
             device_id: self.device_id,
             axes: [
-                AxisEvent {
-                    typ: AxisValType::Rel,
-                    axis: Axis::X,
-                    value: report_x,
-                },
-                AxisEvent {
-                    typ: AxisValType::Rel,
-                    axis: Axis::Y,
-                    value: report_y,
-                },
-                AxisEvent {
-                    typ: AxisValType::Rel,
-                    axis: Axis::Z,
-                    value: 0,
-                },
+                relative_axis(Axis::X, report_x),
+                relative_axis(Axis::Y, report_y),
+                relative_axis(Axis::Z, 0),
             ],
         });
     }
@@ -276,7 +372,15 @@ impl Touchpad {
     }
 
     async fn read(&mut self, reg: u16, out: &mut [u8]) -> bool {
-        self.i2c.write_read(IQS5XX_ADDR, &reg.to_be_bytes(), out).await.is_ok()
+        let address = reg.to_be_bytes();
+        if self.i2c.write_read(IQS5XX_ADDR, &address, out).await.is_ok() {
+            return true;
+        }
+
+        // IQS5xx deliberately NACKs the first address while waking from LP or
+        // suspend. The datasheet requires a retry after at least 150 us.
+        Timer::after(Duration::from_micros(200)).await;
+        self.i2c.write_read(IQS5XX_ADDR, &address, out).await.is_ok()
     }
 
     async fn write_u8(&mut self, reg: u16, val: u8) -> bool {
@@ -306,16 +410,76 @@ fn side_for_device_id(device_id: u8) -> u8 {
 
 enum TouchReadResult {
     Motion { x: i16, y: i16 },
+    Gesture { buttons: u8 },
+    Scroll { h: i16, v: i16 },
     NoMotion,
     ReadFailed,
 }
 
-fn now_ms() -> u32 {
-    Instant::now().as_millis() as u32
+fn relative_axis(axis: Axis, value: i16) -> AxisEvent {
+    AxisEvent {
+        typ: AxisValType::Rel,
+        axis,
+        value,
+    }
 }
 
-fn deadline_pending(now: u32, deadline: u32) -> bool {
-    deadline != 0 && deadline.wrapping_sub(now) < u32::MAX / 2
+fn scroll_delta(x: i16, y: i16) -> Option<(i16, i16)> {
+    // IQS5xx and the original K:04 backend report only one scroll direction
+    // per sample, with horizontal motion taking priority.
+    if x != 0 {
+        let h = x / SCROLL_DIVISOR;
+        return (h != 0).then_some((h, 0));
+    }
+    if y != 0 {
+        let v = y / SCROLL_DIVISOR;
+        return (v != 0).then_some((0, v));
+    }
+    None
+}
+
+fn touch_poll_interval(idle_for: Duration) -> Duration {
+    let interval_ms = if idle_for < TOUCH_ACTIVE_POLL_WINDOW {
+        REPORT_RATE_ACTIVE_MS
+    } else if idle_for < TOUCH_IDLE_POLL_WINDOW {
+        REPORT_RATE_IDLE_MS
+    } else if idle_for < TOUCH_LP1_POLL_WINDOW {
+        REPORT_RATE_LP1_MS
+    } else {
+        REPORT_RATE_LP2_MS
+    };
+    Duration::from_millis(interval_ms as u64)
+}
+
+struct NeverSub;
+pub struct NeverEvent;
+
+impl EventSubscriber for NeverSub {
+    type Event = NeverEvent;
+
+    async fn next_event(&mut self) -> NeverEvent {
+        core::future::pending().await
+    }
+}
+
+impl Runnable for Touchpad {
+    async fn run(&mut self) -> ! {
+        self.run_loop().await
+    }
+}
+
+impl Processor for Touchpad {
+    type Event = NeverEvent;
+
+    fn subscriber() -> impl EventSubscriber<Event = NeverEvent> {
+        NeverSub
+    }
+
+    async fn process(&mut self, _: NeverEvent) {}
+
+    async fn process_loop(&mut self) -> ! {
+        self.run().await
+    }
 }
 
 fn clamp_motion_accum(value: i32) -> i32 {

@@ -92,10 +92,21 @@ build_k04_series_profile() {
         cargo build --release "${bins[@]}"
 }
 
-build_qube() {
-    local keyboard="$1"
-    run "keyboards/$keyboard" env CARGO_TARGET_DIR=target/qube cargo build --release --bin qube --features qube
-    run "keyboards/$keyboard" env CARGO_TARGET_DIR=target/halves cargo build --release --bin left --bin right
+build_classic_qube_profile() {
+    local profile="$1"
+    local keyboard_toml="$2"
+    local vial_json="$3"
+
+    run "keyboards/op36_qube" env \
+        "CARGO_TARGET_DIR=target/$profile/qube" \
+        "KEYBOARD_TOML_PATH=$repo_root/keyboards/op36_qube/$keyboard_toml" \
+        "VIAL_JSON_PATH=$repo_root/$vial_json" \
+        cargo build --release --bin qube --features qube
+    run "keyboards/op36_qube" env \
+        "CARGO_TARGET_DIR=target/$profile/halves" \
+        "KEYBOARD_TOML_PATH=$repo_root/keyboards/op36_qube/$keyboard_toml" \
+        "VIAL_JSON_PATH=$repo_root/$vial_json" \
+        cargo build --release --bin left --bin right
 }
 
 build_k04_qube_profile() {
@@ -131,7 +142,10 @@ build_split velvet_ui
 run "keyboards/trackball_v30" cargo build --release --bin keyboard
 run "keyboards/trackball_v31" cargo build --release --bin keyboard
 run "keyboards/trackball_royale" cargo build --release --bin keyboard
-build_qube op36_qube
+build_classic_qube_profile op36 keyboard.toml keyboards/op36_qube/vial.json
+build_classic_qube_profile k03 keyboard_k03.toml keyboards/k03/vial.json
+build_classic_qube_profile velvet keyboard_velvet.toml keyboards/velvet/vial.json
+build_classic_qube_profile imperial44 keyboard_imperial44.toml keyboards/imperial44/vial.json
 
 echo
 echo "Root RMK build matrix OK"

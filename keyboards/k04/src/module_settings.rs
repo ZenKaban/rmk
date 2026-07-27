@@ -34,6 +34,8 @@ const IDX_MODULE_SELECT: usize = 39;
 const IDX_AXIS_FLAGS: usize = 42;
 const IDX_LEFT_ENCODER_STEPS: usize = 43;
 const IDX_RIGHT_ENCODER_STEPS: usize = 44;
+const AUTO_FLAG_TOUCH_GESTURES_LEFT: u8 = 1 << 4;
+const AUTO_FLAG_TOUCH_GESTURES_RIGHT: u8 = 1 << 5;
 const AUTO_FLAG_CHARGE_INDICATOR_DISABLED: u8 = 1 << 6;
 
 const BALL_DPI_TABLE: [u16; 16] = [
@@ -108,6 +110,15 @@ pub fn scale_touch_delta(value: i16, side: u8) -> i16 {
     scaled.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
 }
 
+pub fn touch_gestures_enabled(side: u8) -> bool {
+    let mask = if side == 0 {
+        AUTO_FLAG_TOUCH_GESTURES_LEFT
+    } else {
+        AUTO_FLAG_TOUCH_GESTURES_RIGHT
+    };
+    byte(IDX_AUTO_FLAGS) & mask != 0
+}
+
 pub(crate) fn apply_settings_packet(data: &[u8; 27]) {
     if data[0] == VERSION | 0x40 {
         ensure_initialized();
@@ -130,6 +141,7 @@ pub(crate) fn apply_settings_packet(data: &[u8; 27]) {
     if data[0] != VERSION {
         return;
     }
+    ensure_initialized();
     SETTINGS[0].store(VERSION, Ordering::Relaxed);
     SETTINGS[IDX_LEFT_MODE].store(data[1] & 0x03, Ordering::Relaxed);
     SETTINGS[IDX_RIGHT_MODE].store((data[1] >> 2) & 0x03, Ordering::Relaxed);

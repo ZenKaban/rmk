@@ -204,7 +204,7 @@ impl<S: PointingDriver> PointingDevice<S> {
     // ¦                 >- Event returned  ¦
     // +------------------------------------+
     async fn read_pointing_event(&mut self) -> PointingEvent {
-        use embassy_futures::select::{Either, select};
+        use embassy_futures::select::{select, Either};
 
         if self.last_poll == Instant::MIN {
             self.last_poll = Instant::now();
@@ -568,6 +568,9 @@ const QUBE_AUTO_LAYER_NONE: u8 = 0xff;
 const QUBE_MODE_KEY_TAP_MS: u32 = 220;
 const QUBE_TEXT_AXIS_IDLE_MS: u32 = 220;
 const QUBE_TEXT_THRESHOLD: i32 = 1;
+const QUBE_TOUCH_CLICK_MS: u64 = 40;
+const QUBE_TOUCH_LEFT_BUTTON: u8 = 1 << 0;
+const QUBE_TOUCH_RIGHT_BUTTON: u8 = 1 << 1;
 const QUBE_AUTO_LAYER_TIMEOUT_MS_TABLE: [u32; 6] = [250, 500, 750, 1000, 1250, 1500];
 const QUBE_DEFAULT_AUTO_LAYER_TIMEOUT_INDEX: u8 = 1;
 const QUBE_FLAG_LEFT_INVERT_SCROLL_Y: u8 = 1 << 0;
@@ -872,6 +875,7 @@ impl<'a> QubePointingModeProcessor<'a> {
         let mut y = 0i16;
         let mut wheel = 0i16;
         let mut pan = 0i16;
+        let mut gesture_buttons = 0u8;
 
         for axis_event in event.axes.iter() {
             match axis_event.axis {
@@ -879,12 +883,31 @@ impl<'a> QubePointingModeProcessor<'a> {
                 Axis::Y => y = axis_event.value,
                 Axis::V => wheel = axis_event.value,
                 Axis::H => pan = axis_event.value,
+                Axis::Z if source.kind == QubePointingKind::Touch => {
+                    gesture_buttons = qube_touch_gesture_buttons(axis_event.value)
+                }
                 _ => {}
             }
         }
 
+        if gesture_buttons != 0 {
+            self.click(gesture_buttons).await;
+            return;
+        }
+
         if wheel != 0 || pan != 0 {
-            self.send_mouse(0, 0, 0, wheel, pan).await;
+            let invert_x = if self.settings.invert_scroll_x(source.side) {
+                -1
+            } else {
+                1
+            };
+            let invert_y = if self.settings.invert_scroll_y(source.side) {
+                -1
+            } else {
+                1
+            };
+            self.send_mouse(0, 0, 0, wheel.saturating_mul(invert_y), pan.saturating_mul(invert_x))
+                .await;
             return;
         }
         if x == 0 && y == 0 {
@@ -962,6 +985,12 @@ impl<'a> QubePointingModeProcessor<'a> {
     async fn send_mouse(&self, buttons: u8, x: i16, y: i16, wheel: i16, pan: i16) {
         let buttons = self.keymap.mouse_buttons() | buttons;
         send_mouse_report(buttons, 0, x, y, wheel, pan).await;
+    }
+
+    async fn click(&self, buttons: u8) {
+        self.send_mouse(buttons, 0, 0, 0, 0).await;
+        Timer::after(Duration::from_millis(QUBE_TOUCH_CLICK_MS)).await;
+        send_mouse_report_unchecked(self.keymap.mouse_buttons(), 0, 0, 0, 0).await;
     }
 
     fn mode_for_side(&self, side: usize) -> QubePointingMode {
@@ -1049,6 +1078,14 @@ fn qube_pointing_source(device_id: u8) -> Option<QubePointingSource> {
     }
 }
 
+fn qube_touch_gesture_buttons(value: i16) -> u8 {
+    match value {
+        value if value == i16::from(QUBE_TOUCH_LEFT_BUTTON) => QUBE_TOUCH_LEFT_BUTTON,
+        value if value == i16::from(QUBE_TOUCH_RIGHT_BUTTON) => QUBE_TOUCH_RIGHT_BUTTON,
+        _ => 0,
+    }
+}
+
 fn qube_divided_motion(state: &mut QubePointingSideState, x: i16, y: i16, divisor: i32) -> (i16, i16) {
     let divisor = divisor.max(1);
     state.remainder_x = state.remainder_x.saturating_add(x as i32);
@@ -1127,6 +1164,10 @@ async fn send_mouse_report(source_buttons: u8, buttons: u8, x: i16, y: i16, whee
         return;
     }
 
+    send_mouse_report_unchecked(buttons, x, y, wheel, pan).await;
+}
+
+async fn send_mouse_report_unchecked(buttons: u8, x: i16, y: i16, wheel: i16, pan: i16) {
     send_hid_report(Report::MouseReport(MouseReport {
         buttons,
         x: x.clamp(i8::MIN as i16, i8::MAX as i16) as i8,
@@ -1385,7 +1426,11 @@ fn compute_caret_taps(
         MovementAxis::Y => accumulator.reset_x(),
     }
 
-    if count == 0 { None } else { Some((keycode, count)) }
+    if count == 0 {
+        None
+    } else {
+        Some((keycode, count))
+    }
 }
 
 #[cfg(test)]
@@ -1407,6 +1452,21 @@ mod tests {
             .filter_level(log::LevelFilter::Debug)
             .is_test(true)
             .try_init();
+    }
+
+    #[test]
+    fn qube_touch_gesture_buttons_accepts_only_supported_clicks() {
+        assert_eq!(
+            qube_touch_gesture_buttons(i16::from(QUBE_TOUCH_LEFT_BUTTON)),
+            QUBE_TOUCH_LEFT_BUTTON
+        );
+        assert_eq!(
+            qube_touch_gesture_buttons(i16::from(QUBE_TOUCH_RIGHT_BUTTON)),
+            QUBE_TOUCH_RIGHT_BUTTON
+        );
+        assert_eq!(qube_touch_gesture_buttons(0), 0);
+        assert_eq!(qube_touch_gesture_buttons(3), 0);
+        assert_eq!(qube_touch_gesture_buttons(-1), 0);
     }
 
     struct DummyDriver {
@@ -2016,7 +2076,7 @@ mod tests {
         // 3 calls of (20, 20): total grows (20,20)→(40,40)→(60,60)
         assert!(compute_caret_taps(20, 20, &mut a, &cfg()).is_none()); // 40
         assert!(compute_caret_taps(20, 20, &mut a, &cfg()).is_none()); // 80
-        // 3rd call: |60|+|60|=120 > 100 → tap
+                                                                       // 3rd call: |60|+|60|=120 > 100 → tap
         assert_eq!(compute_caret_taps(20, 20, &mut a, &cfg()), Some((HidKeyCode::Right, 1)));
     }
 
