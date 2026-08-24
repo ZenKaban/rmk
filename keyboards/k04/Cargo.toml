@@ -1,9 +1,10 @@
 [package]
 name = "k04"
 version = "0.1.0"
-description = "RMK BLE split firmware for Ergohaven K:04 Series (nRF52840)"
-homepage = "https://github.com/eh-fws/k04-rmk"
-repository = "https://github.com/eh-fws/k04-rmk"
+description = "Shared RMK BLE firmware for Ergohaven K:04 Series, standalone and Qube (nRF52840)"
+homepage = "https://github.com/ergohaven/rmk"
+repository = "https://github.com/ergohaven/rmk"
+readme = "README.md"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 autotests = false
@@ -11,24 +12,44 @@ autobenches = false
 autoexamples = false
 
 [features]
-default = []
+default = ["standalone"]
+standalone = ["rmk/defmt"]
 usb_debug = ["rmk/usb_log"]
 usb_debug_force_ble = ["usb_debug"]
+# Qube dongle ST7789 UI (only for --bin qube).
+qube = [
+    "rmk/usb_log",
+    "rmk/st7789",
+    "dep:lcd-async",
+    "dep:embedded-hal-bus",
+    "dep:embedded-graphics",
+    "dep:rmk-types",
+    "dep:u8g2-fonts",
+]
+# Preserve the former Qube-half build feature set without enabling USB logging
+# in standalone K:04 firmware.
+qube-half = ["rmk/usb_log"]
 
 [dependencies]
 rmk = { path = "../../rmk", default-features = false, features = [
-    "defmt",
     "storage",
     "vial",
     "vial_lock",
+    "universal_symbols",
     "nrf52840_ble",
     "split",
     "async_matrix",
     "adafruit_bl",
     "display",
 ] }
+embedded-hal-bus = { version = "0.3", features = ["async"], optional = true }
+embedded-graphics = { version = "0.8", optional = true }
+lcd-async = { version = "0.1", optional = true }
+rmk-types = { path = "../../rmk-types", optional = true }
+u8g2-fonts = { version = "0.5.2", features = ["embedded_graphics_textstyle"], optional = true }
 heapless = "0.9"
 embassy-futures = "0.1"
+embassy-sync = "0.8"
 nrf-sdc = { git = "https://github.com/alexmoon/nrf-sdc", rev = "abe49d22ebfc85fae134eb082fbfddf752016a55", features = [
     "defmt",
     "peripheral",
@@ -84,6 +105,27 @@ bench = false
 [[bin]]
 name = "peripheral"
 path = "src/peripheral.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "qube"
+path = "src/qube.rs"
+required-features = ["qube"]
+test = false
+bench = false
+
+[[bin]]
+name = "left"
+path = "src/left.rs"
+required-features = ["qube-half"]
+test = false
+bench = false
+
+[[bin]]
+name = "right"
+path = "src/right.rs"
+required-features = ["qube-half"]
 test = false
 bench = false
 

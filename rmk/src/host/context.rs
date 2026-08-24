@@ -1,8 +1,9 @@
 //! Shared façade for host-facing services (Vial today, rmk_protocol next).
 //!
 //! Bundles every keymap mutation with its flash persistence so callers don't
-//! repeat `keymap.X(); FLASH_CHANNEL.send(FlashOperationMessage::Y).await`
-//! by hand, and exposes synchronous reads of live keyboard state (LED,
+//! repeat storage plumbing by hand. Key positions use a last-write-wins
+//! staging area so the serial host service never waits for flash capacity.
+//! The façade also exposes synchronous reads of live keyboard state (LED,
 //! battery, connection, active layer) that are otherwise scattered across
 //! module-private statics.
 //!
@@ -17,14 +18,20 @@ use rmk_types::action::{EncoderAction, KeyAction};
 use rmk_types::battery::BatteryStatus;
 use rmk_types::combo::Combo as ComboConfig;
 use rmk_types::connection::ConnectionStatus;
+use rmk_types::fork::Fork;
 use rmk_types::led_indicator::LedIndicator;
 use rmk_types::morse::{Morse, MorseProfile};
 
+#[cfg(feature = "storage")]
+use crate::channel::MACRO_FLASH_SIGNAL;
 use crate::event::KeyboardEventPos;
 use crate::keyboard::combo::Combo;
 use crate::keymap::KeyMap;
 #[cfg(feature = "storage")]
-use crate::{channel::FLASH_CHANNEL, storage::FlashOperationMessage};
+use crate::{
+    channel::FLASH_CHANNEL,
+    storage::{FlashOperationMessage, queue_keymap_flash_write},
+};
 
 /// Façade shared between Vial and rmk_protocol host services.
 ///
@@ -60,20 +67,14 @@ impl<'a> KeyboardContext<'a> {
         self.keymap
             .set_action_at(KeyboardEventPos::key_pos(col, row), layer as usize, action);
         #[cfg(feature = "storage")]
-        FLASH_CHANNEL
-            .send(FlashOperationMessage::KeymapKey {
-                layer,
-                row,
-                col,
-                action,
-            })
-            .await;
+        if !queue_keymap_flash_write(layer, row, col, action) {
+            error!("Failed to stage keymap key at layer {} ({},{})", layer, row, col);
+        }
     }
 
     /// Synchronous on purpose: Vial's bulk-write path (`DynamicKeymapSetBuffer`)
-    /// calls this in a tight loop and would otherwise serialize against flash
-    /// for the whole packet. Drops the persist message on a full channel
-    /// rather than awaiting capacity, matching pre-context Vial behavior.
+    /// calls this in a tight loop. Persistence is staged in the key-position
+    /// coalescer, so a full flash channel cannot drop the update or block Vial.
     ///
     /// `rows` / `cols` are passed in so callers can hoist the dimensions read
     /// out of their loop — see `keymap_dimensions()`.
@@ -82,19 +83,8 @@ impl<'a> KeyboardContext<'a> {
         #[cfg(feature = "storage")]
         {
             let (row, col, layer) = position_from_flat_index(index, rows, cols);
-            if FLASH_CHANNEL
-                .try_send(FlashOperationMessage::KeymapKey {
-                    layer: layer as u8,
-                    row: row as u8,
-                    col: col as u8,
-                    action,
-                })
-                .is_err()
-            {
-                error!(
-                    "Failed to persist keymap key at layer {} ({},{}): flash channel full",
-                    layer, row, col
-                );
+            if !queue_keymap_flash_write(layer as u8, row as u8, col as u8, action) {
+                error!("Failed to stage keymap key at layer {} ({},{})", layer, row, col);
             }
         }
         #[cfg(not(feature = "storage"))]
@@ -147,15 +137,20 @@ impl<'a> KeyboardContext<'a> {
         self.keymap.read_macro_buffer(offset, target);
     }
 
-    /// Vial's protocol expects every set to be followed by a full-buffer save.
-    pub async fn write_macro_buffer(&self, offset: usize, data: &[u8]) {
+    /// Update the live macro buffer and queue a flash snapshot only after the
+    /// complete set of macro slots has arrived. Vial GUI and Entropy both send
+    /// all slots as NUL-terminated bytecode, including empty trailing slots.
+    pub fn write_macro_buffer(&self, offset: usize, data: &[u8], macro_count: usize) -> bool {
         self.keymap.write_macro_buffer(offset, data);
+        let received_end = (offset + data.len()).min(crate::MACRO_SPACE_SIZE);
+        let transfer_complete = received_end == crate::MACRO_SPACE_SIZE
+            || self.keymap.macro_buffer_has_terminators(received_end, macro_count);
         #[cfg(feature = "storage")]
-        {
-            let buf = self.keymap.get_macro_sequences();
-            FLASH_CHANNEL.send(FlashOperationMessage::MacroData(buf)).await;
-            info!("Flush macros to storage");
+        if transfer_complete {
+            MACRO_FLASH_SIGNAL.signal(self.keymap.get_macro_sequences());
+            info!("Queue completed macro snapshot for storage");
         }
+        transfer_complete
     }
 
     pub fn reset_macro_buffer(&self) {
@@ -168,18 +163,19 @@ impl<'a> KeyboardContext<'a> {
         self.keymap.with_combos(f)
     }
 
-    /// Replace the combo at `idx` with `config` (or remove it if `config` is
-    /// empty) and persist. No-op if `idx` is out of range.
+    /// Replace the combo at `idx` with `config` (or remove it if actions,
+    /// output, and layer are all empty) and persist. No-op if `idx` is out of range.
     pub async fn set_combo(&self, idx: u8, config: ComboConfig) {
         let valid = self.keymap.with_combos_mut(|combos| {
             if (idx as usize) >= combos.len() {
                 return false;
             }
-            combos[idx as usize] = if config.actions.is_empty() && config.output == KeyAction::No {
-                None
-            } else {
-                Some(Combo::new(config.clone()))
-            };
+            combos[idx as usize] =
+                if config.actions.is_empty() && config.output == KeyAction::No && config.layer.is_none() {
+                    None
+                } else {
+                    Some(Combo::new(config.clone()))
+                };
             true
         });
         if !valid {
@@ -189,6 +185,29 @@ impl<'a> KeyboardContext<'a> {
         FLASH_CHANNEL.send(FlashOperationMessage::Combo { idx, config }).await;
         #[cfg(not(feature = "storage"))]
         let _ = config;
+    }
+
+    // ── Forks (Vial: key override) ───────────────────────────────────────
+
+    pub fn with_forks<R>(&self, f: impl FnOnce(&[Fork]) -> R) -> R {
+        self.keymap.with_forks(f)
+    }
+
+    /// Replace the fork at `idx` with `fork` and persist. No-op if `idx` is
+    /// out of range.
+    pub async fn set_fork(&self, idx: u8, fork: Fork) {
+        let valid = self.keymap.with_forks_mut(|forks| {
+            if (idx as usize) >= forks.len() {
+                return false;
+            }
+            forks[idx as usize] = fork;
+            true
+        });
+        if !valid {
+            return;
+        }
+        #[cfg(feature = "storage")]
+        FLASH_CHANNEL.send(FlashOperationMessage::Fork { idx, fork }).await;
     }
 
     // ── Morses (Vial: tap-dance) ─────────────────────────────────────────

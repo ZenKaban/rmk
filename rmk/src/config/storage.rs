@@ -8,6 +8,10 @@ pub struct StorageConfig {
     pub num_sectors: u8,
     pub clear_storage: bool,
     pub clear_layout: bool,
+    /// Use a new storage key namespace from this layer onward, allowing a
+    /// firmware to replace legacy tail-layer defaults without touching lower
+    /// user-configured layers.
+    pub no_action_layer_start: Option<u8>,
 }
 
 impl Default for StorageConfig {
@@ -17,6 +21,7 @@ impl Default for StorageConfig {
             num_sectors: 2,
             clear_storage: false,
             clear_layout: false,
+            no_action_layer_start: None,
         }
     }
 }

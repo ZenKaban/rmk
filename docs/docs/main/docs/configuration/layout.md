@@ -9,6 +9,8 @@
 rows = 5
 cols = 4
 layers = 3
+# Optional: auto-filled layers at and above this index use `No` instead of `_`.
+no_action_layer_start = 2
 matrix_map = """
     ... the mapping between the "electronic matrix" of your keyboard
         and your key map configuration is described here ...
@@ -90,7 +92,21 @@ The number and order of entries on each defined layer must be identical with the
 
 ::: warning
 
-If the number of defined layers is smaller than what was defined in `layout.layers`, RMK will fill empty layers automatically (so you can configure them freely in Vial). But the empty layers still consume flash and RAM, so if you don't have enough space for them, it's not recommended to use a big layer count.
+If the number of defined layers is smaller than what was defined in
+`layout.layers`, RMK will fill empty layers automatically so you can configure
+them freely in Vial. They use transparent (`_`) actions by default. Set
+`layout.no_action_layer_start` to make automatically filled layers from that
+zero-based index onward use no-action (`No`) keys instead. Explicitly defined
+layers are never changed by this option.
+
+When storage is enabled, keys and encoders at or above this boundary use a
+separate storage namespace. Existing saved actions below the boundary remain
+active, saved actions from the old tail namespace are ignored, and future
+changes to tail layers continue to persist. This lets firmware replace legacy
+transparent tail layers without a full settings reset.
+
+Empty layers still consume flash and RAM, so if you don't have enough space for
+them, it's not recommended to use a big layer count.
 
 :::
 

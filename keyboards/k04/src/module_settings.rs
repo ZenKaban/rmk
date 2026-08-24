@@ -1,7 +1,9 @@
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
-use rmk::event::PeripheralSettingsEvent;
+use embassy_sync::watch::Watch;
+use rmk::event::{PeripheralSettingsEvent, SleepStateEvent};
 use rmk::macros::processor;
+use rmk::split::ble::central::{set_split_link_profile, SplitLinkProfile};
 
 const VERSION: u8 = 9;
 const SETTINGS_LEN: usize = 45;
@@ -43,6 +45,32 @@ const BALL_DPI_TABLE: [u16; 16] = [
 ];
 
 static SETTINGS: [AtomicU8; SETTINGS_LEN] = [const { AtomicU8::new(0) }; SETTINGS_LEN];
+static MODULE_SELECTIONS: Watch<rmk::RawMutex, [ModuleSelection; 2], 4> = Watch::new_with([ModuleSelection::None; 2]);
+static MODULE_SLEEPING: AtomicBool = AtomicBool::new(false);
+static MODULE_SLEEP_STATE: Watch<rmk::RawMutex, bool, 4> = Watch::new_with(false);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModuleSelection {
+    None,
+    Encoder,
+    Trackball,
+    Touchpad,
+}
+
+impl ModuleSelection {
+    fn from_raw(value: u8) -> Self {
+        match value & 0x03 {
+            1 => Self::Encoder,
+            2 => Self::Trackball,
+            3 => Self::Touchpad,
+            _ => Self::None,
+        }
+    }
+
+    fn is_pointing(self) -> bool {
+        matches!(self, Self::Trackball | Self::Touchpad)
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Rgb {
@@ -51,7 +79,7 @@ pub struct Rgb {
     pub b: u8,
 }
 
-#[processor(subscribe = [PeripheralSettingsEvent])]
+#[processor(subscribe = [PeripheralSettingsEvent, SleepStateEvent])]
 pub struct ModuleSettingsSync;
 
 impl ModuleSettingsSync {
@@ -62,6 +90,18 @@ impl ModuleSettingsSync {
 
     async fn on_peripheral_settings_event(&mut self, event: PeripheralSettingsEvent) {
         apply_settings_packet(&event.0);
+    }
+
+    async fn on_sleep_state_event(&mut self, event: SleepStateEvent) {
+        MODULE_SLEEPING.store(event.0, Ordering::Release);
+        MODULE_SLEEP_STATE.sender().send_if_modified(|current| {
+            if current.as_ref() == Some(&event.0) {
+                false
+            } else {
+                *current = Some(event.0);
+                true
+            }
+        });
     }
 }
 
@@ -119,6 +159,31 @@ pub fn touch_gestures_enabled(side: u8) -> bool {
     byte(IDX_AUTO_FLAGS) & mask != 0
 }
 
+pub fn module_selection(side: u8) -> ModuleSelection {
+    ensure_initialized();
+    module_selections()[usize::from(side.min(1))]
+}
+
+pub async fn wait_for_module_selection_change(side: u8, current: ModuleSelection) -> ModuleSelection {
+    ensure_initialized();
+    let side = usize::from(side.min(1));
+    let mut receiver = MODULE_SELECTIONS
+        .receiver()
+        .expect("K:04 module selection receiver capacity exhausted");
+    receiver.get_and(|selections| selections[side] != current).await[side]
+}
+
+pub fn module_sleeping() -> bool {
+    MODULE_SLEEPING.load(Ordering::Acquire)
+}
+
+pub async fn wait_for_module_sleep_change(current: bool) -> bool {
+    let mut receiver = MODULE_SLEEP_STATE
+        .receiver()
+        .expect("K:04 module sleep receiver capacity exhausted");
+    receiver.get_and(|sleeping| *sleeping != current).await
+}
+
 pub(crate) fn apply_settings_packet(data: &[u8; 27]) {
     if data[0] == VERSION | 0x40 {
         ensure_initialized();
@@ -172,6 +237,7 @@ pub(crate) fn apply_settings_packet(data: &[u8; 27]) {
     }
     SETTINGS[IDX_MODULE_SELECT].store(data[25] & 0x0f, Ordering::Relaxed);
     SETTINGS[IDX_AXIS_FLAGS].store(data[26] & 0x0f, Ordering::Relaxed);
+    apply_module_selection_runtime();
 }
 
 fn ensure_initialized() {
@@ -216,6 +282,49 @@ fn ensure_initialized() {
     SETTINGS[IDX_BT_PROFILE_COLORS + 2].store(6, Ordering::Relaxed);
     SETTINGS[IDX_BT_PROFILE_COLORS + 3].store(8, Ordering::Relaxed);
     SETTINGS[IDX_BT_PROFILE_COLORS + 4].store(19, Ordering::Relaxed);
+    apply_module_selection_runtime();
+}
+
+fn module_selections() -> [ModuleSelection; 2] {
+    let packed = SETTINGS[IDX_MODULE_SELECT].load(Ordering::Relaxed);
+    [
+        ModuleSelection::from_raw(packed),
+        ModuleSelection::from_raw(packed >> 2),
+    ]
+}
+
+fn apply_module_selection_runtime() {
+    let selections = module_selections();
+    MODULE_SELECTIONS.sender().send_if_modified(|current| {
+        if current.as_ref() == Some(&selections) {
+            false
+        } else {
+            *current = Some(selections);
+            true
+        }
+    });
+
+    rmk::input_device::rotary_encoder::set_encoder_enabled(0, selections[0] == ModuleSelection::Encoder);
+    rmk::input_device::rotary_encoder::set_encoder_enabled(1, selections[1] == ModuleSelection::Encoder);
+
+    #[cfg(feature = "qube")]
+    {
+        let _ = set_split_link_profile(0, link_profile(selections[0]));
+        let _ = set_split_link_profile(1, link_profile(selections[1]));
+    }
+    #[cfg(not(feature = "qube"))]
+    {
+        // Standalone K:04 has one split peripheral: the right half.
+        let _ = set_split_link_profile(0, link_profile(selections[1]));
+    }
+}
+
+fn link_profile(selection: ModuleSelection) -> SplitLinkProfile {
+    if selection.is_pointing() {
+        SplitLinkProfile::Pointing
+    } else {
+        SplitLinkProfile::Keyboard
+    }
 }
 
 fn byte(idx: usize) -> u8 {

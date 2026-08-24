@@ -13,10 +13,14 @@ use embassy_nrf::saadc::{self, Input as _, Saadc};
 use embassy_nrf::{bind_interrupts, Peri};
 use embassy_time::{with_timeout, Duration, Timer};
 use rmk::core_traits::Runnable;
-use rmk::event::{EventSubscriber, PeripheralBatteryRefreshEvent, SubscribableEvent};
+use rmk::event::{
+    publish_event, BatteryStatusEvent, EventSubscriber, PeripheralBatteryRefreshEvent, SubscribableEvent,
+};
 use rmk::input_device::battery::publish_battery_status;
 use rmk::processor::Processor;
 use rmk::types::battery::{BatteryStatus, ChargeState};
+
+use crate::battery_level::BatteryLevelTracker;
 
 bind_interrupts!(struct SaadcIrqs {
     SAADC => saadc::InterruptHandler;
@@ -27,7 +31,6 @@ const FULL_MV: i32 = 4100;
 // Calibrated from K:04 Qube halves: raw ~= 2520 at 3.150 V and 2600 at 3.281 V.
 const RAW_PER_MV_NUM: i32 = 4;
 const RAW_PER_MV_DEN: i32 = 5;
-const HYSTERESIS_PCT: u8 = 2;
 const CHARGING_SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
 const DISCHARGING_SAMPLE_INTERVAL: Duration = Duration::from_secs(15);
 
@@ -45,28 +48,23 @@ fn percent(val: u16) -> u8 {
     }
 }
 
-pub struct K04Battery {
+#[allow(dead_code)]
+pub type K04Battery = BatteryReader<true>;
+#[allow(dead_code)]
+pub type K04QubeBattery = BatteryReader<false>;
+
+pub struct BatteryReader<const CACHE_HOST_STATUS: bool> {
     saadc: Saadc<'static, 1>,
-    level: Option<u8>,
+    level: BatteryLevelTracker,
 }
 
-impl K04Battery {
+impl<const CACHE_HOST_STATUS: bool> BatteryReader<CACHE_HOST_STATUS> {
     pub fn new(saadc: Peri<'static, SAADC>, pin: Peri<'static, P0_31>) -> Self {
         interrupt::SAADC.set_priority(interrupt::Priority::P3);
         let channel = saadc::ChannelConfig::single_ended(pin.degrade_saadc());
         Self {
             saadc: Saadc::new(saadc, SaadcIrqs, saadc::Config::default(), [channel]),
-            level: None,
-        }
-    }
-
-    fn smoothed_percent(&mut self, next: u8) -> u8 {
-        match self.level {
-            Some(current) if next != 0 && next != 100 && next.abs_diff(current) < HYSTERESIS_PCT => current,
-            _ => {
-                self.level = Some(next);
-                next
-            }
+            level: BatteryLevelTracker::default(),
         }
     }
 
@@ -99,14 +97,27 @@ impl K04Battery {
     }
 
     async fn publish_sample(&mut self) {
-        let status = match self.sample_raw().await {
-            Some(raw) => BatteryStatus::Available {
-                charge_state: current_charge_state(),
-                level: Some(self.smoothed_percent(percent(raw))),
-            },
-            None => BatteryStatus::Unavailable,
+        let charge_state = current_charge_state();
+        let charging = charge_state == ChargeState::Charging;
+        let measured = if charging {
+            // VBUS only tells us that charging power is present. The charger
+            // raises terminal voltage toward 4.1 V before the cell is full,
+            // so publishing that sample would create a false 100% reading.
+            None
+        } else {
+            self.sample_raw().await.map(percent)
         };
-        publish_battery_status(status);
+        let level = self.level.observe(measured, charging);
+        let status = if charging || measured.is_some() {
+            BatteryStatus::Available { charge_state, level }
+        } else {
+            BatteryStatus::Unavailable
+        };
+        if CACHE_HOST_STATUS {
+            publish_battery_status(status);
+        } else {
+            publish_event(BatteryStatusEvent(status));
+        }
     }
 }
 
@@ -132,7 +143,7 @@ impl EventSubscriber for NeverSub {
     }
 }
 
-impl Runnable for K04Battery {
+impl<const CACHE_HOST_STATUS: bool> Runnable for BatteryReader<CACHE_HOST_STATUS> {
     async fn run(&mut self) -> ! {
         Timer::after(Duration::from_millis(1000)).await;
         let mut refresh_sub = PeripheralBatteryRefreshEvent::subscriber();
@@ -147,7 +158,7 @@ impl Runnable for K04Battery {
     }
 }
 
-impl Processor for K04Battery {
+impl<const CACHE_HOST_STATUS: bool> Processor for BatteryReader<CACHE_HOST_STATUS> {
     type Event = NeverEvent;
     fn subscriber() -> impl EventSubscriber<Event = NeverEvent> {
         NeverSub

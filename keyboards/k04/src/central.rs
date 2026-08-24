@@ -1,12 +1,17 @@
 #![no_main]
 #![no_std]
 
+mod battery_level;
 mod battery_nrf;
+#[path = "../../common/default_layer_names.rs"]
+mod default_layer_names;
 mod layer_led;
 mod layer_names;
 mod module_settings;
 mod touchpad;
 mod trackball;
+
+const DEFAULT_LAYER_NAMES: [&str; 16] = default_layer_names::STANDARD_WITH_MOUSE;
 
 use rmk::macros::rmk_central;
 
@@ -31,6 +36,11 @@ mod keyboard_central {
         crate::module_settings::ModuleSettingsSync::new()
     }
 
+    #[register_processor(event)]
+    fn module_settings_broadcast() -> crate::layer_names::ModuleSettingsBroadcast {
+        crate::layer_names::ModuleSettingsBroadcast::new()
+    }
+
     #[register_processor(poll)]
     fn ergohaven_user_keys() -> ::rmk::processor::builtin::ergohaven::ErgohavenUserKeys {
         ::rmk::processor::builtin::ergohaven::ErgohavenUserKeys::new()
@@ -38,7 +48,7 @@ mod keyboard_central {
 
     #[register_processor(event)]
     fn trackball() -> crate::trackball::Trackball {
-        crate::trackball::Trackball::new(
+        crate::trackball::Trackball::new_central(
             crate::trackball::new_trackball_from_pins(0, p.P0_01, p.P0_00, p.P0_05, p.P1_09),
             0,
         )

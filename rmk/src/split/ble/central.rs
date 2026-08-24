@@ -1,5 +1,5 @@
 use core::cell::{Cell, RefCell};
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use bt_hci::cmd::le::{LeReadLocalSupportedFeatures, LeSetPhy, LeSetScanParams};
 use bt_hci::controller::{ControllerCmdAsync, ControllerCmdSync};
@@ -11,17 +11,19 @@ use embassy_time::{Duration, Instant, Timer, with_timeout};
 use heapless::VecView;
 use trouble_host::prelude::*;
 
-use crate::ble::{SLEEPING_STATE, update_ble_phy, update_conn_params};
+use crate::SPLIT_PAIRING_TIMEOUT_SECONDS;
+use crate::ble::sleep::{is_sleeping, report_activity, report_pointing_activity};
+use crate::ble::{update_ble_phy, update_conn_params};
 use crate::channel::FLASH_CHANNEL;
 use crate::event::{
-    PeripheralConnectedEvent, SleepStateEvent, SplitConnectionState, SplitConnectionStateEvent, publish_event,
+    EventSubscriber, PeripheralConnectedEvent, PointingEvent, SleepStateEvent, SplitConnectionState,
+    SplitConnectionStateEvent, SubscribableEvent, publish_event,
 };
 #[cfg(feature = "storage")]
 use crate::split::ble::PeerAddress;
 use crate::split::driver::{PeripheralManager, SplitDriverError, SplitReader, SplitWriter};
-use crate::split::{SPLIT_MESSAGE_MAX_SIZE, SplitMessage};
+use crate::split::{SPLIT_MESSAGE_MAX_SIZE, SplitMessage, encode_split_message};
 use crate::storage::FlashOperationMessage;
-use crate::{SPLIT_CENTRAL_SLEEP_TIMEOUT_SECONDS, SPLIT_PAIRING_TIMEOUT_SECONDS};
 
 pub(crate) static STACK_STARTED: Signal<crate::RawMutex, bool> = Signal::new();
 pub(crate) static PERIPHERAL_FOUND: Signal<crate::RawMutex, (u8, BdAddr)> = Signal::new();
@@ -31,20 +33,140 @@ static START_SCANNING: Signal<crate::RawMutex, ()> = Signal::new();
 static STOP_SCANNING: Signal<crate::RawMutex, ()> = Signal::new();
 static SCANNING_MUTEX: Mutex<crate::RawMutex, ()> = Mutex::new(());
 static UNCOMMITTED_PEER_CANDIDATES: BlockingMutex<crate::RawMutex, Cell<u32>> = BlockingMutex::new(Cell::new(0));
-static CONNECTED_PERIPHERALS: AtomicU32 = AtomicU32::new(0);
+static CONNECTED_PERIPHERALS: BlockingMutex<crate::RawMutex, Cell<u32>> = BlockingMutex::new(Cell::new(0));
 static PERIPHERAL_CONNECTION_CHANGED: Signal<crate::RawMutex, ()> = Signal::new();
 static SPLIT_WINDOW_RESTART: Signal<crate::RawMutex, u32> = Signal::new();
 static SPLIT_WINDOW_DONE: Signal<crate::RawMutex, u32> = Signal::new();
-static SPLIT_WINDOW_GENERATION: AtomicU32 = AtomicU32::new(0);
+static SPLIT_WINDOW_GENERATION: BlockingMutex<crate::RawMutex, Cell<u32>> = BlockingMutex::new(Cell::new(0));
+#[derive(Clone, Copy)]
+struct LinkProfileOverrides {
+    configured: u32,
+    pointing: u32,
+}
+static LINK_PROFILE_OVERRIDES: BlockingMutex<crate::RawMutex, Cell<LinkProfileOverrides>> =
+    BlockingMutex::new(Cell::new(LinkProfileOverrides {
+        configured: 0,
+        pointing: 0,
+    }));
+static LINK_PROFILE_CHANGED: [Signal<crate::RawMutex, ()>; u32::BITS as usize] =
+    [const { Signal::new() }; u32::BITS as usize];
 
-static LAST_ACTIVITY_MS: AtomicU32 = AtomicU32::new(0);
-static SPLIT_SLEEP_REQUESTED: AtomicBool = AtomicBool::new(false);
-
-const SPLIT_ACTIVE_WINDOW_MS: u32 = 2_000;
-const SPLIT_POWER_POLL_MS: u64 = 100;
+static LAST_POINTING_ACTIVITY_MS: AtomicU32 = AtomicU32::new(0);
+// PMW3610 may emit background +/-1 reports while settling. Velvet's
+// auto-mouse layer uses the same threshold so UI work does not remain deferred
+// after meaningful cursor movement has stopped.
+const POINTING_ACTIVITY_THRESHOLD: u16 = 2;
 
 const SPLIT_SERVICE_UUID: [u8; 16] = [70, 153, 101, 152, 54, 53, 10, 191, 7, 75, 229, 24, 170, 251, 213, 77];
 const SPLIT_COMPANY_ID: u16 = 0xe118;
+const VALIDATED_PEER_FAILURE_LIMIT: u8 = 3;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FailedPeerAction {
+    Retain { consecutive_failures: u8 },
+    Forget,
+}
+
+#[derive(Default)]
+struct PeerRetryState {
+    validated_failures: u8,
+}
+
+impl PeerRetryState {
+    fn on_failed_attempt(&mut self, uncommitted: bool) -> FailedPeerAction {
+        if uncommitted {
+            self.validated_failures = 0;
+            return FailedPeerAction::Forget;
+        }
+
+        self.validated_failures = self.validated_failures.saturating_add(1);
+        if self.validated_failures >= VALIDATED_PEER_FAILURE_LIMIT {
+            self.validated_failures = 0;
+            FailedPeerAction::Forget
+        } else {
+            FailedPeerAction::Retain {
+                consecutive_failures: self.validated_failures,
+            }
+        }
+    }
+
+    fn on_validated(&mut self) {
+        self.validated_failures = 0;
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SplitScanTiming {
+    interval: Duration,
+    window: Duration,
+}
+
+fn split_scan_timing() -> SplitScanTiming {
+    // A continuous split scan can starve an already-connected host link on a
+    // single radio. Leave 70% of each cycle to established link traffic.
+    SplitScanTiming {
+        interval: Duration::from_millis(100),
+        window: Duration::from_millis(30),
+    }
+}
+
+fn split_liveness_poll() -> Duration {
+    Duration::from_millis(250)
+}
+
+/// Active connection cadence for a generated split keyboard.
+///
+/// Generated split keyboards apply the low-latency profile only to a
+/// peripheral that owns a pointing device. Key-only links retain the
+/// lower-power 15 ms cadence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SplitLinkProfile {
+    Keyboard,
+    Pointing,
+}
+
+/// Override the active BLE cadence for one split peripheral at runtime.
+///
+/// Generated keyboards keep their compile-time profile until this is called.
+/// This lets a hot-configurable board switch between a key-only link and a
+/// 125 Hz pointing link without declaring a second hardware device in TOML.
+pub fn set_split_link_profile(peripheral_id: usize, profile: SplitLinkProfile) -> bool {
+    let Some(changed) = LINK_PROFILE_CHANGED.get(peripheral_id) else {
+        return false;
+    };
+    let bit = bit_for_peri(peripheral_id);
+    let (was_configured, previous_pointing) = LINK_PROFILE_OVERRIDES.lock(|state| {
+        let current = state.get();
+        let pointing = match profile {
+            SplitLinkProfile::Keyboard => current.pointing & !bit,
+            SplitLinkProfile::Pointing => current.pointing | bit,
+        };
+        state.set(LinkProfileOverrides {
+            configured: current.configured | bit,
+            pointing,
+        });
+        (current.configured & bit != 0, current.pointing & bit != 0)
+    });
+    let is_pointing = profile == SplitLinkProfile::Pointing;
+    if !was_configured || previous_pointing != is_pointing {
+        changed.signal(());
+    }
+    true
+}
+
+fn effective_split_link_profile(peripheral_id: usize, generated: SplitLinkProfile) -> SplitLinkProfile {
+    let bit = bit_for_peri(peripheral_id);
+    LINK_PROFILE_OVERRIDES.lock(|state| {
+        let state = state.get();
+        if state.configured & bit == 0 {
+            generated
+        } else if state.pointing & bit != 0 {
+            SplitLinkProfile::Pointing
+        } else {
+            SplitLinkProfile::Keyboard
+        }
+    })
+}
 
 fn required_peripheral_mask() -> u32 {
     if crate::SPLIT_PERIPHERALS_NUM >= u32::BITS as usize {
@@ -55,16 +177,19 @@ fn required_peripheral_mask() -> u32 {
 }
 
 fn all_peripherals_connected() -> bool {
-    CONNECTED_PERIPHERALS.load(Ordering::Acquire) & required_peripheral_mask() == required_peripheral_mask()
+    CONNECTED_PERIPHERALS.lock(Cell::get) & required_peripheral_mask() == required_peripheral_mask()
 }
 
 fn publish_peripheral_connection(id: usize, connected: bool) {
     let bit = bit_for_peri(id);
-    if connected {
-        CONNECTED_PERIPHERALS.fetch_or(bit, Ordering::AcqRel);
-    } else {
-        CONNECTED_PERIPHERALS.fetch_and(!bit, Ordering::AcqRel);
-    }
+    CONNECTED_PERIPHERALS.lock(|state| {
+        let next = if connected {
+            state.get() | bit
+        } else {
+            state.get() & !bit
+        };
+        state.set(next);
+    });
     publish_event(PeripheralConnectedEvent { id, connected });
     PERIPHERAL_CONNECTION_CHANGED.signal(());
 }
@@ -82,7 +207,7 @@ fn publish_split_connection_state(state: SplitConnectionState, generation: u32, 
 /// owns the visible `Searching -> Connected/Idle` state and its timeout.
 pub async fn run_split_connection_supervisor() {
     let timeout = Duration::from_secs(u64::from(SPLIT_PAIRING_TIMEOUT_SECONDS));
-    let mut generation = SPLIT_WINDOW_GENERATION.load(Ordering::Acquire);
+    let mut generation = SPLIT_WINDOW_GENERATION.lock(Cell::get);
     let mut state = if all_peripherals_connected() {
         SplitConnectionState::Connected
     } else {
@@ -194,7 +319,11 @@ pub(crate) async fn wait_for_split_connection_window() {
         return;
     }
 
-    let generation = SPLIT_WINDOW_GENERATION.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+    let generation = SPLIT_WINDOW_GENERATION.lock(|state| {
+        let next = state.get().wrapping_add(1);
+        state.set(next);
+        next
+    });
     SPLIT_WINDOW_RESTART.signal(generation);
     loop {
         if SPLIT_WINDOW_DONE.wait().await == generation {
@@ -241,8 +370,11 @@ pub async fn scan_peripherals<
                     let mut central = stack.central();
                     wait_for_stack_started().await;
                     let mut scanner = Scanner::new(&mut central);
+                    let timing = split_scan_timing();
                     let scan_config = ScanConfig {
                         active: false,
+                        interval: timing.interval,
+                        window: timing.window,
                         ..Default::default()
                     };
                     let _guard = SCANNING_MUTEX.lock().await;
@@ -379,16 +511,31 @@ fn take_uncommitted_peer_candidate(peri_id: usize) -> bool {
     })
 }
 
-async fn forget_failed_peer(peri_id: usize, addrs: &RefCell<VecView<Option<[u8; 6]>>>) {
-    take_uncommitted_peer_candidate(peri_id);
+async fn handle_failed_peer(
+    peri_id: usize,
+    addrs: &RefCell<VecView<Option<[u8; 6]>>>,
+    retry_state: &mut PeerRetryState,
+) {
+    let uncommitted = take_uncommitted_peer_candidate(peri_id);
+    match retry_state.on_failed_attempt(uncommitted) {
+        FailedPeerAction::Retain { consecutive_failures } => {
+            warn!(
+                "Retaining validated split peer {} after transient connection failure {}/{}",
+                peri_id, consecutive_failures, VALIDATED_PEER_FAILURE_LIMIT
+            );
+            return;
+        }
+        FailedPeerAction::Forget => {}
+    }
+
     if let Some(addr) = addrs.borrow_mut().get_mut(peri_id) {
         *addr = None;
     }
 
-    // A stored address can belong to an older Qube/half pairing. Keeping it
-    // after an initiating failure prevents the central from ever scanning for
-    // the currently powered peripheral. Invalidate only after the connection
-    // attempt itself fails; normal disconnects retain the proven address.
+    // An address learned by the current scan is not trusted until product
+    // validation succeeds, so forget it immediately. A previously validated
+    // peer gets a bounded retry window before it is cleared, allowing both
+    // transient recovery and eventual replacement/re-pairing.
     #[cfg(feature = "storage")]
     FLASH_CHANNEL
         .send(FlashOperationMessage::PeerAddress(PeerAddress::new(
@@ -429,8 +576,10 @@ pub(crate) async fn run_ble_peripheral_manager<
     peri_id: usize,
     addrs: &RefCell<VecView<Option<[u8; 6]>>>,
     stack: &'b Stack<'s, C, DefaultPacketPool>,
+    profile: SplitLinkProfile,
 ) {
     trace!("SPLIT_MESSAGE_MAX_SIZE: {}", SPLIT_MESSAGE_MAX_SIZE);
+    let mut peer_retry_state = PeerRetryState::default();
 
     loop {
         // Check until the address is available
@@ -447,14 +596,15 @@ pub(crate) async fn run_ble_peripheral_manager<
         info!("Peripheral peer address: {:?}", address);
 
         let mut central = stack.central();
+        let active_profile = effective_split_link_profile(peri_id, profile);
+        let timing = split_scan_timing();
         let config = ConnectConfig {
-            connect_params: defaul_central_conn_param(),
+            connect_params: active_central_conn_param(active_profile),
             scan_config: ScanConfig {
                 filter_accept_list: &[address],
-                // Match the effective 62.5 ms initiating scan used by the
-                // last working bt-hci 0.6 firmware.
-                interval: Duration::from_micros(62_500),
-                window: Duration::from_micros(62_500),
+                active: false,
+                interval: timing.interval,
+                window: timing.window,
                 ..Default::default()
             },
         };
@@ -488,6 +638,7 @@ pub(crate) async fn run_ble_peripheral_manager<
                     stack,
                     &conn,
                     &peer_validated,
+                    profile,
                 )
                 .await
                 {
@@ -495,24 +646,23 @@ pub(crate) async fn run_ble_peripheral_manager<
                     let e = defmt::Debug2Format(&e);
                     error!("BLE central error: {:?}", e);
                 }
-                if !peer_validated.get() {
+                publish_peripheral_connection(peri_id, false);
+                if peer_validated.get() {
+                    peer_retry_state.on_validated();
+                } else {
                     warn!("Split peripheral {} disconnected before validation", peri_id);
-                    // A successful HCI connection can still fail during GATT
-                    // discovery or product validation. Treat that exactly like
-                    // an initiating failure so a stale saved address cannot
-                    // trap Qube in an endless reconnect loop.
-                    forget_failed_peer(peri_id, addrs).await;
+                    handle_failed_peer(peri_id, addrs, &mut peer_retry_state).await;
                 }
             }
             Ok(Err(e)) => {
                 #[cfg(feature = "defmt")]
                 let e = defmt::Debug2Format(&e);
                 error!("Connect to peripheral {} error: {:?}", peri_id, e);
-                forget_failed_peer(peri_id, addrs).await;
+                handle_failed_peer(peri_id, addrs, &mut peer_retry_state).await;
             }
             Err(_) => {
                 warn!("Connect to peripheral {} timeout", peri_id);
-                forget_failed_peer(peri_id, addrs).await;
+                handle_failed_peer(peri_id, addrs, &mut peer_retry_state).await;
             }
         }
         // Reconnect after 500ms
@@ -520,22 +670,16 @@ pub(crate) async fn run_ble_peripheral_manager<
     }
 }
 
-fn defaul_central_conn_param() -> RequestedConnParams {
+fn active_central_conn_param(profile: SplitLinkProfile) -> RequestedConnParams {
+    let interval = match profile {
+        SplitLinkProfile::Keyboard => Duration::from_millis(15),
+        SplitLinkProfile::Pointing => Duration::from_micros(7_500),
+    };
     RequestedConnParams {
-        min_connection_interval: Duration::from_millis(15),
-        max_connection_interval: Duration::from_millis(15),
-        // Keep active split links awake every interval so central-to-peripheral
-        // layer/state updates reach LEDs without slave-latency delay.
-        max_latency: 0,
-        supervision_timeout: Duration::from_secs(5),
-        ..Default::default()
-    }
-}
-
-fn idle_central_conn_param() -> RequestedConnParams {
-    RequestedConnParams {
-        min_connection_interval: Duration::from_millis(30),
-        max_connection_interval: Duration::from_millis(30),
+        min_connection_interval: interval,
+        max_connection_interval: interval,
+        // Active split links must attend every event. In particular, a
+        // pointing link cannot sustain 125 Hz with peripheral latency.
         max_latency: 0,
         supervision_timeout: Duration::from_secs(5),
         ..Default::default()
@@ -544,12 +688,13 @@ fn idle_central_conn_param() -> RequestedConnParams {
 
 fn sleeping_central_conn_param() -> RequestedConnParams {
     RequestedConnParams {
-        min_connection_interval: Duration::from_millis(200),
-        max_connection_interval: Duration::from_millis(200),
-        // A sleeping peripheral must still attend every 200ms connection
-        // event. Allowing 25 skipped events delayed the first key or pointing
-        // packet from a split peripheral by up to five seconds.
-        max_latency: 0,
+        // Keep a short base interval so a peripheral with queued key events
+        // can attend the next connection event and drain the burst promptly.
+        // Slave latency retains an effective idle cadence of about 210 ms
+        // (30 ms * 7) while avoiding the old 200 ms-per-event wake backlog.
+        min_connection_interval: Duration::from_millis(30),
+        max_connection_interval: Duration::from_millis(30),
+        max_latency: 6,
         supervision_timeout: Duration::from_secs(11),
         ..Default::default()
     }
@@ -606,28 +751,28 @@ async fn run_central_manager_task<
     stack: &'b Stack<'s, C, P>,
     conn: &Connection<'b, P>,
     peer_validated: &Cell<bool>,
+    profile: SplitLinkProfile,
 ) -> Result<(), BleHostError<C::Error>> {
     let client = GattClient::<C, P, 10>::new(stack, conn).await?;
 
-    // Use 2M Phy
+    // Use 2M Phy.
     update_ble_phy(stack, conn).await;
 
     info!("Updating connection parameters for peripheral");
-    update_conn_params(stack, conn, &defaul_central_conn_param()).await;
+    let active_profile = effective_split_link_profile(id, profile);
+    update_conn_params(stack, conn, &active_central_conn_param(active_profile)).await;
 
-    let result = match select3(
+    match select3(
         ble_central_task(&client, conn),
         run_peripheral_manager::<_, _, ROW, COL, ROW_OFFSET, COL_OFFSET>(id, peer_address, &client, peer_validated),
-        sleep_manager_task(stack, conn),
+        follow_sleep_state(stack, conn, id, profile),
     )
     .await
     {
         Either3::First(e) => e,
         Either3::Second(e) => e,
         Either3::Third(e) => e,
-    };
-
-    result
+    }
 }
 
 async fn ble_central_task<'a, C: Controller + ControllerCmdAsync<LeSetPhy>, P: PacketPool>(
@@ -637,7 +782,7 @@ async fn ble_central_task<'a, C: Controller + ControllerCmdAsync<LeSetPhy>, P: P
     // Simply monitor connection status
     let conn_check = async {
         while conn.is_connected() {
-            Timer::after_secs(5).await;
+            Timer::after(split_liveness_poll()).await;
         }
     };
 
@@ -741,12 +886,12 @@ impl<'a, 'b, 'c, C: Controller + ControllerCmdAsync<LeSetPhy>, P: PacketPool> Sp
     async fn read(&mut self) -> Result<SplitMessage, SplitDriverError> {
         let data = self.listener.next().await;
         let message = postcard::from_bytes(data.as_ref()).map_err(|_| SplitDriverError::DeserializeError)?;
-        info!("Received split message: {:?}", message);
+        trace!("Received split message: {:?}", message);
 
-        // Update last activity time when receiving key events from peripheral
-        if matches!(message, SplitMessage::Key(_) | SplitMessage::Pointing(_)) {
-            debug!("Activity {:?} detected from peripheral", &message);
-            update_activity_time();
+        match &message {
+            SplitMessage::Pointing(event) => update_pointing_activity_time(event),
+            SplitMessage::Key(_) => report_activity(),
+            _ => {}
         }
 
         Ok(message)
@@ -758,11 +903,11 @@ impl<'a, 'b, 'c, C: Controller + ControllerCmdAsync<LeSetPhy>, P: PacketPool> Sp
 {
     async fn write(&mut self, message: &SplitMessage) -> Result<usize, SplitDriverError> {
         let mut buf = [0_u8; SPLIT_MESSAGE_MAX_SIZE];
-        match postcard::to_slice(&message, &mut buf) {
-            Ok(_bytes) => {
+        match encode_split_message(message, &mut buf) {
+            Ok(encoded) => {
                 if let Err(e) = self
                     .client
-                    .write_characteristic_without_response(&self.message_to_peripheral, &buf)
+                    .write_characteristic_without_response(&self.message_to_peripheral, encoded)
                     .await
                 {
                     if let BleHostError::BleHost(Error::NotFound) = e {
@@ -773,11 +918,12 @@ impl<'a, 'b, 'c, C: Controller + ControllerCmdAsync<LeSetPhy>, P: PacketPool> Sp
                     let e = defmt::Debug2Format(&e);
                     error!("BLE message_to_peripheral_write error: {:?}", e);
                 }
+                return Ok(encoded.len());
             }
             Err(e) => error!("Postcard serialize split message error: {}", e),
         };
 
-        Ok(SPLIT_MESSAGE_MAX_SIZE)
+        Err(SplitDriverError::SerializeError)
     }
 }
 
@@ -794,74 +940,10 @@ pub(crate) async fn wait_for_stack_started() {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SplitPowerMode {
-    Active,
-    Idle,
-    Sleeping,
-}
-
-fn desired_split_power_mode(now_ms: u32, last_activity_ms: u32, sleep_requested: bool) -> SplitPowerMode {
-    let inactive_ms = now_ms.wrapping_sub(last_activity_ms);
-    if sleep_requested
-        || (SPLIT_CENTRAL_SLEEP_TIMEOUT_SECONDS != 0
-            && inactive_ms >= u32::from(SPLIT_CENTRAL_SLEEP_TIMEOUT_SECONDS).saturating_mul(1_000))
-    {
-        SplitPowerMode::Sleeping
-    } else if inactive_ms >= SPLIT_ACTIVE_WINDOW_MS {
-        SplitPowerMode::Idle
-    } else {
-        SplitPowerMode::Active
-    }
-}
-
-/// Own the split central's global sleep state.
-///
-/// This task is independent of individual peripheral connections so the
-/// configured inactivity timeout still publishes `SleepStateEvent` when a
-/// link is missing, reconnecting, or changing its connection parameters.
-pub async fn run_split_power_state_manager() -> ! {
-    let now_ms = Instant::now().as_millis() as u32;
-    if LAST_ACTIVITY_MS
-        .compare_exchange(0, now_ms, Ordering::AcqRel, Ordering::Acquire)
-        .is_ok()
-    {
-        SPLIT_SLEEP_REQUESTED.store(false, Ordering::Release);
-    }
-
-    let mut sleeping = desired_split_power_mode(
-        now_ms,
-        LAST_ACTIVITY_MS.load(Ordering::Acquire),
-        SPLIT_SLEEP_REQUESTED.load(Ordering::Acquire),
-    ) == SplitPowerMode::Sleeping;
-
-    if sleeping && !SLEEPING_STATE.swap(true, Ordering::AcqRel) {
-        publish_event(SleepStateEvent::new(true));
-    }
-
-    loop {
-        Timer::after_millis(SPLIT_POWER_POLL_MS).await;
-        let next_sleeping = desired_split_power_mode(
-            Instant::now().as_millis() as u32,
-            LAST_ACTIVITY_MS.load(Ordering::Acquire),
-            SPLIT_SLEEP_REQUESTED.load(Ordering::Acquire),
-        ) == SplitPowerMode::Sleeping;
-        if next_sleeping == sleeping {
-            continue;
-        }
-
-        sleeping = next_sleeping;
-        if SLEEPING_STATE.swap(sleeping, Ordering::AcqRel) != sleeping {
-            publish_event(SleepStateEvent::new(sleeping));
-        }
-    }
-}
-
-/// Adapt split-link connection parameters to recent keyboard activity.
-///
-/// State is shared through atomics instead of a single-consumer signal so a
-/// Qube can manage both peripheral links independently.
-async fn sleep_manager_task<
+/// Keep one split link synchronized with the keyboard-wide sleep manager.
+/// The manager outlives every connection; this follower is recreated with the
+/// link and owns only that link's connection parameters.
+async fn follow_sleep_state<
     'b,
     's: 'b,
     C: Controller + ControllerCmdAsync<LeSetPhy> + ControllerCmdSync<LeReadLocalSupportedFeatures>,
@@ -869,73 +951,162 @@ async fn sleep_manager_task<
 >(
     stack: &'b Stack<'s, C, P>,
     conn: &Connection<'b, P>,
+    peripheral_id: usize,
+    generated_profile: SplitLinkProfile,
 ) -> Result<(), BleHostError<C::Error>> {
-    info!(
-        "Adaptive split power manager started with {}s sleep timeout",
-        SPLIT_CENTRAL_SLEEP_TIMEOUT_SECONDS
-    );
+    let mut sleep_events = SleepStateEvent::subscriber();
+    let profile_changed = LINK_PROFILE_CHANGED.get(peripheral_id);
 
-    let mut current_mode = SplitPowerMode::Active;
+    // A new link must follow the already-latched keyboard state. Treating link
+    // creation as user input can wake the host and every other split link.
+    let mut applied_sleeping = if is_sleeping() {
+        info!("New split link inherits sleep mode");
+        update_conn_params(stack, conn, &sleeping_central_conn_param()).await
+    } else {
+        false
+    };
+    let mut applied_profile = effective_split_link_profile(peripheral_id, generated_profile);
     loop {
-        Timer::after_millis(SPLIT_POWER_POLL_MS).await;
-        let next_mode = desired_split_power_mode(
-            Instant::now().as_millis() as u32,
-            LAST_ACTIVITY_MS.load(Ordering::Acquire),
-            SPLIT_SLEEP_REQUESTED.load(Ordering::Acquire),
-        );
-        if next_mode == current_mode {
-            continue;
-        }
-
-        let conn_params = match next_mode {
-            SplitPowerMode::Active => {
-                info!("Split link entering active mode");
-                defaul_central_conn_param()
-            }
-            SplitPowerMode::Idle => {
-                info!("Split link entering idle mode");
-                idle_central_conn_param()
-            }
-            SplitPowerMode::Sleeping => {
-                info!("Split link entering sleep mode");
-                sleeping_central_conn_param()
-            }
+        let update = if let Some(profile_changed) = profile_changed {
+            select(sleep_events.next_event(), profile_changed.wait()).await
+        } else {
+            Either::First(sleep_events.next_event().await)
         };
-        update_conn_params(stack, conn, &conn_params).await;
-
-        // A single split link owns the central sleep state itself. Keeping the
-        // transition here avoids an extra global task on ordinary two-half
-        // keyboards, while multi-peripheral centrals (for example Qube) use
-        // `run_split_power_state_manager` so one link cannot consume another
-        // link's sleep transition.
-        if crate::SPLIT_PERIPHERALS_NUM == 1 {
-            if next_mode == SplitPowerMode::Sleeping {
-                if !SLEEPING_STATE.swap(true, Ordering::AcqRel) {
-                    publish_event(SleepStateEvent::new(true));
+        match update {
+            Either::First(event) => {
+                let sleeping = event.0;
+                if sleeping == applied_sleeping {
+                    continue;
                 }
-            } else if current_mode == SplitPowerMode::Sleeping && SLEEPING_STATE.swap(false, Ordering::AcqRel) {
-                publish_event(SleepStateEvent::new(false));
+
+                let profile = effective_split_link_profile(peripheral_id, generated_profile);
+                let conn_params = if sleeping {
+                    info!("Split link entering sleep mode");
+                    sleeping_central_conn_param()
+                } else {
+                    info!("Split link restoring active mode");
+                    active_central_conn_param(profile)
+                };
+                if update_conn_params(stack, conn, &conn_params).await {
+                    applied_sleeping = sleeping;
+                    if !sleeping {
+                        applied_profile = profile;
+                    }
+                }
+            }
+            Either::Second(_) => {
+                let profile = effective_split_link_profile(peripheral_id, generated_profile);
+                if applied_sleeping || profile == applied_profile {
+                    continue;
+                }
+                info!("Split link applying runtime active profile");
+                if update_conn_params(stack, conn, &active_central_conn_param(profile)).await {
+                    applied_profile = profile;
+                }
             }
         }
-        current_mode = next_mode;
     }
 }
 
-/// Update the activity time to indicate user activity
-pub(crate) fn update_activity_time() {
-    LAST_ACTIVITY_MS.store(Instant::now().as_millis() as u32, Ordering::Release);
-    SPLIT_SLEEP_REQUESTED.store(false, Ordering::Release);
-    debug!("Activity detected, restoring active split link");
+fn quiet_period_remaining(now_ms: u32, last_activity_ms: u32, quiet_period: Duration) -> Duration {
+    if last_activity_ms == 0 {
+        return Duration::MIN;
+    }
+
+    quiet_period
+        .checked_sub(Duration::from_millis(u64::from(now_ms.wrapping_sub(last_activity_ms))))
+        .unwrap_or(Duration::MIN)
 }
 
-/// Request deep split-link sleep from a host suspend or transport timeout.
-pub(crate) fn request_sleep() {
-    SPLIT_SLEEP_REQUESTED.store(true, Ordering::Release);
+/// Record motion separately from general split activity so status-only work
+/// can yield until the real-time pointing path is quiet.
+fn update_pointing_activity_time(event: &PointingEvent) {
+    let now_ms = Instant::now().as_millis() as u32;
+    if event.has_relative_xy_motion(POINTING_ACTIVITY_THRESHOLD) {
+        LAST_POINTING_ACTIVITY_MS.store(now_ms, Ordering::Release);
+    }
+    report_pointing_activity(event);
+}
+
+/// Return the time remaining before pointing has been idle for `quiet_period`.
+///
+/// Qube's display uses this to defer SPI rendering while relative motion is
+/// arriving; it does not alter the connection cadence or sleep policy.
+pub fn pointing_quiet_period_remaining(quiet_period: Duration) -> Duration {
+    quiet_period_remaining(
+        Instant::now().as_millis() as u32,
+        LAST_POINTING_ACTIVITY_MS.load(Ordering::Acquire),
+        quiet_period,
+    )
 }
 
 #[cfg(test)]
 mod advertisement_tests {
     use super::*;
+
+    #[test]
+    fn uncommitted_peer_is_forgotten_after_first_failure() {
+        let mut retry = PeerRetryState::default();
+
+        assert_eq!(retry.on_failed_attempt(true), FailedPeerAction::Forget);
+    }
+
+    #[test]
+    fn validated_peer_is_retried_twice_then_forgotten() {
+        let mut retry = PeerRetryState::default();
+
+        assert_eq!(
+            retry.on_failed_attempt(false),
+            FailedPeerAction::Retain {
+                consecutive_failures: 1
+            }
+        );
+        assert_eq!(
+            retry.on_failed_attempt(false),
+            FailedPeerAction::Retain {
+                consecutive_failures: 2
+            }
+        );
+        assert_eq!(retry.on_failed_attempt(false), FailedPeerAction::Forget);
+    }
+
+    #[test]
+    fn successful_validation_resets_peer_failure_count() {
+        let mut retry = PeerRetryState::default();
+        assert!(matches!(
+            retry.on_failed_attempt(false),
+            FailedPeerAction::Retain {
+                consecutive_failures: 1
+            }
+        ));
+        assert!(matches!(
+            retry.on_failed_attempt(false),
+            FailedPeerAction::Retain {
+                consecutive_failures: 2
+            }
+        ));
+
+        retry.on_validated();
+
+        assert_eq!(
+            retry.on_failed_attempt(false),
+            FailedPeerAction::Retain {
+                consecutive_failures: 1
+            }
+        );
+    }
+
+    #[test]
+    fn split_scan_leaves_radio_time_for_established_links() {
+        assert_eq!(
+            split_scan_timing(),
+            SplitScanTiming {
+                interval: Duration::from_millis(100),
+                window: Duration::from_millis(30),
+            }
+        );
+        assert_eq!(split_liveness_poll(), Duration::from_millis(250));
+    }
 
     fn current_advertisement(product_id: u16, peripheral_id: u8) -> [u8; 28] {
         let mut data = [0u8; 28];
@@ -984,23 +1155,104 @@ mod advertisement_tests {
     }
 
     #[test]
-    fn split_power_mode_tracks_activity_and_sleep_timeout() {
-        assert_eq!(desired_split_power_mode(1_999, 0, false), SplitPowerMode::Active);
-        assert_eq!(desired_split_power_mode(2_000, 0, false), SplitPowerMode::Idle);
+    fn pointing_profile_uses_7_5_ms_without_slave_latency() {
+        let params = active_central_conn_param(SplitLinkProfile::Pointing);
 
-        if SPLIT_CENTRAL_SLEEP_TIMEOUT_SECONDS != 0 {
-            let timeout_ms = u32::from(SPLIT_CENTRAL_SLEEP_TIMEOUT_SECONDS) * 1_000;
-            assert_eq!(desired_split_power_mode(timeout_ms, 0, false), SplitPowerMode::Sleeping);
-        }
-        assert_eq!(desired_split_power_mode(1, 0, true), SplitPowerMode::Sleeping);
+        assert_eq!(params.min_connection_interval, Duration::from_micros(7_500));
+        assert_eq!(params.max_connection_interval, Duration::from_micros(7_500));
+        assert_eq!(params.max_latency, 0);
     }
 
     #[test]
-    fn sleeping_split_link_bounds_first_peripheral_event_latency() {
+    fn keyboard_profile_retains_15_ms_cadence() {
+        let params = active_central_conn_param(SplitLinkProfile::Keyboard);
+
+        assert_eq!(params.min_connection_interval, Duration::from_millis(15));
+        assert_eq!(params.max_connection_interval, Duration::from_millis(15));
+        assert_eq!(params.max_latency, 0);
+    }
+
+    #[test]
+    fn runtime_profile_override_replaces_generated_profile_per_link() {
+        assert_eq!(
+            effective_split_link_profile(30, SplitLinkProfile::Keyboard),
+            SplitLinkProfile::Keyboard
+        );
+        assert!(set_split_link_profile(30, SplitLinkProfile::Pointing));
+        assert_eq!(
+            effective_split_link_profile(30, SplitLinkProfile::Keyboard),
+            SplitLinkProfile::Pointing
+        );
+        assert!(set_split_link_profile(30, SplitLinkProfile::Keyboard));
+        assert_eq!(
+            effective_split_link_profile(30, SplitLinkProfile::Pointing),
+            SplitLinkProfile::Keyboard
+        );
+        assert!(!set_split_link_profile(32, SplitLinkProfile::Pointing));
+    }
+
+    #[test]
+    fn pointing_quiet_period_waits_only_for_recent_motion() {
+        let quiet_period = Duration::from_millis(100);
+
+        assert_eq!(quiet_period_remaining(1_000, 0, quiet_period), Duration::MIN);
+        assert_eq!(
+            quiet_period_remaining(1_050, 1_000, quiet_period),
+            Duration::from_millis(50)
+        );
+        assert_eq!(quiet_period_remaining(1_100, 1_000, quiet_period), Duration::MIN);
+    }
+
+    #[test]
+    fn pointing_activity_threshold_ignores_pmw3610_settling_noise() {
+        use crate::event::{Axis, AxisEvent, AxisValType};
+
+        let event = |x, y| PointingEvent {
+            device_id: 0,
+            axes: [
+                AxisEvent {
+                    typ: AxisValType::Rel,
+                    axis: Axis::X,
+                    value: x,
+                },
+                AxisEvent {
+                    typ: AxisValType::Rel,
+                    axis: Axis::Y,
+                    value: y,
+                },
+                AxisEvent {
+                    typ: AxisValType::Rel,
+                    axis: Axis::Z,
+                    value: 0,
+                },
+            ],
+        };
+
+        assert!(!event(1, -1).has_relative_xy_motion(POINTING_ACTIVITY_THRESHOLD));
+        assert!(event(2, 0).has_relative_xy_motion(POINTING_ACTIVITY_THRESHOLD));
+    }
+
+    #[test]
+    fn pointing_quiet_period_handles_millisecond_counter_wrap() {
+        let quiet_period = Duration::from_millis(100);
+        let last = u32::MAX - 20;
+
+        assert_eq!(
+            quiet_period_remaining(29, last, quiet_period),
+            Duration::from_millis(50)
+        );
+    }
+
+    #[test]
+    fn sleeping_split_link_keeps_short_burst_interval() {
         let params = sleeping_central_conn_param();
 
-        assert_eq!(params.min_connection_interval, Duration::from_millis(200));
-        assert_eq!(params.max_connection_interval, Duration::from_millis(200));
-        assert_eq!(params.max_latency, 0);
+        assert_eq!(params.min_connection_interval, Duration::from_millis(30));
+        assert_eq!(params.max_connection_interval, Duration::from_millis(30));
+        assert_eq!(params.max_latency, 6);
+        assert_eq!(
+            params.max_connection_interval.as_millis() * (u64::from(params.max_latency) + 1),
+            210
+        );
     }
 }

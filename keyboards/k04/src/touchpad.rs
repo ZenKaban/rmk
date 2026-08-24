@@ -1,3 +1,4 @@
+use embassy_futures::select::{select, select3, Either, Either3};
 use embassy_nrf::twim::Twim;
 use embassy_time::{Duration, Instant, Timer};
 use rmk::core_traits::Runnable;
@@ -32,11 +33,13 @@ const REG_HOLD_TIME: u16 = 0x06bd;
 const REG_SCROLL_INITIAL_DISTANCE: u16 = 0x06c8;
 const REG_END_COMMS: u16 = 0xeeee;
 
-const REPORT_RATE_ACTIVE_MS: u16 = 15;
-const REPORT_RATE_IDLE_TOUCH_MS: u16 = 15;
+const REPORT_RATE_ACTIVE_MS: u16 = 8;
+const REPORT_RATE_IDLE_TOUCH_MS: u16 = 8;
 const REPORT_RATE_IDLE_MS: u16 = 40;
 const REPORT_RATE_LP1_MS: u16 = 160;
-const REPORT_RATE_LP2_MS: u16 = 320;
+// Keep the deepest scan cadence at LP1 speed. The extra current is only a few
+// microamps, while 320 ms made the first contact after a long idle visibly lag.
+const REPORT_RATE_LP2_MS: u16 = 160;
 const ACTIVE_MODE_TIMEOUT_SECS: u8 = 1;
 const IDLE_TOUCH_MODE_TIMEOUT_SECS: u8 = 255;
 const IDLE_MODE_TIMEOUT_SECS: u8 = 5;
@@ -52,8 +55,12 @@ const TOUCH_FAST_PROBE_INTERVAL: Duration = Duration::from_millis(500);
 const TOUCH_SLOW_PROBE_INTERVAL: Duration = Duration::from_secs(2);
 const TOUCH_FAST_PROBE_WINDOW: Duration = Duration::from_secs(10);
 const TOUCH_READ_FAILURE_REINIT_THRESHOLD: u8 = 4;
+// Ignore one-frame second-finger glitches caused by reference drift/re-ATI.
+const TOUCH_SCROLL_CONFIRM_SAMPLES: u8 = 3;
 const TOUCH_MOTION_ACCUM_LIMIT: i32 = (i8::MAX as i32) * 2;
-const TOUCH_REPORT_INTERVAL: Duration = Duration::from_millis(16);
+// Keep sampling and report pacing aligned so continuous motion is emitted on
+// every active sample instead of falling into an alternating 15/30 ms cadence.
+const TOUCH_REPORT_INTERVAL: Duration = Duration::from_millis(8);
 const SCROLL_DIVISOR: i16 = 8;
 const BUTTON_LEFT: u8 = 1 << 0;
 const BUTTON_RIGHT: u8 = 1 << 1;
@@ -62,19 +69,28 @@ const GESTURE_0_PRESS_AND_HOLD: u8 = 1 << 1;
 const GESTURE_1_TWO_FINGER_TAP: u8 = 1 << 0;
 const GESTURE_1_SCROLL: u8 = 1 << 1;
 const SYSTEM_INFO_0_SHOW_RESET: u8 = 1 << 7;
+const SYSTEM_INFO_0_CHARGING_MODE: u8 = 0b111;
+const CHARGING_MODE_ACTIVE: u8 = 0b000;
+const CHARGING_MODE_IDLE_TOUCH: u8 = 0b001;
+const SYSTEM_INFO_0_ATI_ERROR: u8 = 1 << 3;
+const SYSTEM_INFO_0_REATI_OCCURRED: u8 = 1 << 4;
 const SYSTEM_INFO_1_TP_MOVEMENT: u8 = 1 << 0;
 const SYSTEM_CONTROL_0_ACK_RESET: u8 = 1 << 7;
 const FILTER_IIR: u8 = 1 << 0;
 const FILTER_MAV: u8 = 1 << 1;
 const FILTER_ALP_COUNT: u8 = 1 << 3;
 const SYSTEM_CONTROL_1_WAKE: u8 = 0;
+const SYSTEM_CONTROL_1_SUSPEND: u8 = 1 << 0;
+const TOUCH_WAKE_SETTLE: Duration = Duration::from_millis(100);
 
 pub struct Touchpad {
     i2c: Twim<'static>,
     device_id: u8,
     side: u8,
     ready: bool,
+    suspended: bool,
     read_failures: u8,
+    multi_finger_samples: u8,
     acc_x: i32,
     acc_y: i32,
     last_report: Instant,
@@ -92,7 +108,9 @@ impl Touchpad {
             device_id,
             side: side_for_device_id(device_id),
             ready: false,
+            suspended: false,
             read_failures: 0,
+            multi_finger_samples: 0,
             acc_x: 0,
             acc_y: 0,
             last_report: Instant::MIN,
@@ -106,9 +124,62 @@ impl Touchpad {
 
     async fn run_loop(&mut self) -> ! {
         loop {
+            let selection = module_settings::module_selection(self.side);
+            if selection != module_settings::ModuleSelection::Touchpad {
+                self.deactivate().await;
+                let _ = module_settings::wait_for_module_selection_change(self.side, selection).await;
+                continue;
+            }
+
+            let sleeping = module_settings::module_sleeping();
+            if sleeping {
+                self.enter_sleep().await;
+                match select(
+                    module_settings::wait_for_module_selection_change(
+                        self.side,
+                        module_settings::ModuleSelection::Touchpad,
+                    ),
+                    module_settings::wait_for_module_sleep_change(sleeping),
+                )
+                .await
+                {
+                    Either::First(_) => self.deactivate().await,
+                    Either::Second(_) => self.resume_from_sleep().await,
+                }
+                continue;
+            }
+
+            if self.suspended {
+                self.resume_from_sleep().await;
+            }
+
             let deadline = if self.ready { self.next_poll } else { self.next_probe };
-            Timer::at(deadline).await;
-            self.poll_once().await;
+            match select3(
+                Timer::at(deadline),
+                module_settings::wait_for_module_selection_change(
+                    self.side,
+                    module_settings::ModuleSelection::Touchpad,
+                ),
+                module_settings::wait_for_module_sleep_change(sleeping),
+            )
+            .await
+            {
+                Either3::First(_) => {
+                    if module_settings::module_sleeping() {
+                        self.enter_sleep().await;
+                    } else {
+                        self.poll_once().await;
+                    }
+                }
+                Either3::Second(_) => self.deactivate().await,
+                Either3::Third(next_sleeping) => {
+                    if next_sleeping {
+                        self.enter_sleep().await;
+                    } else {
+                        self.resume_from_sleep().await;
+                    }
+                }
+            }
         }
     }
 
@@ -140,11 +211,17 @@ impl Touchpad {
                 self.send_scroll(h, v);
                 true
             }
+            TouchReadResult::Contact => {
+                self.read_failures = 0;
+                true
+            }
             TouchReadResult::NoMotion => {
                 self.read_failures = 0;
                 false
             }
             TouchReadResult::ReadFailed => {
+                // A missing frame breaks the consecutive two-finger sequence.
+                self.multi_finger_samples = 0;
                 self.read_failures = self.read_failures.saturating_add(1);
                 if self.read_failures >= TOUCH_READ_FAILURE_REINIT_THRESHOLD {
                     self.reset();
@@ -220,6 +297,7 @@ impl Touchpad {
 
         if ok {
             self.ready = true;
+            self.suspended = false;
             self.read_failures = 0;
             let now = Instant::now();
             self.next_probe = Instant::MIN;
@@ -227,10 +305,67 @@ impl Touchpad {
             self.poll_interval = Duration::from_millis(REPORT_RATE_ACTIVE_MS as u64);
             self.last_activity = now;
             self.unavailable_since = None;
-            self.acc_x = 0;
-            self.acc_y = 0;
+            self.clear_motion_state();
         }
         ok
+    }
+
+    async fn enter_sleep(&mut self) {
+        if self.suspended {
+            return;
+        }
+
+        self.clear_motion_state();
+        self.next_poll = Instant::MIN;
+        if self.ready {
+            self.suspended = self.set_suspend(true).await;
+            if !self.suspended {
+                // Even if the command window was missed, stop forced polling;
+                // the IQS5xx can still downshift to its autonomous LP mode.
+                self.ready = false;
+            }
+        }
+    }
+
+    async fn resume_from_sleep(&mut self) {
+        if self.suspended {
+            let woke = self.set_suspend(false).await;
+            self.suspended = false;
+            if woke && self.ready {
+                let now = Instant::now();
+                self.read_failures = 0;
+                self.clear_motion_state();
+                self.last_activity = now;
+                self.poll_interval = Duration::from_millis(REPORT_RATE_ACTIVE_MS as u64);
+                self.next_poll = now + TOUCH_WAKE_SETTLE;
+                return;
+            }
+            self.ready = false;
+        }
+
+        if !self.ready {
+            self.next_probe = Instant::MIN;
+            self.next_poll = Instant::MIN;
+            self.unavailable_since = None;
+        }
+    }
+
+    async fn set_suspend(&mut self, suspend: bool) -> bool {
+        // Addressing a suspended IQS5xx deliberately NACKs once. read() owns
+        // the required >=150 us retry, then this same communication session
+        // clears SUSPEND before END_COMMS as required by the datasheet.
+        let mut control = [0u8; 1];
+        if !self.read(REG_SYSTEM_CONTROL_1, &mut control).await {
+            return false;
+        }
+        let value = if suspend {
+            control[0] | SYSTEM_CONTROL_1_SUSPEND
+        } else {
+            control[0] & !SYSTEM_CONTROL_1_SUSPEND
+        };
+        let wrote = self.write_u8(REG_SYSTEM_CONTROL_1, value).await;
+        let ended = self.end_session().await;
+        wrote && ended
     }
 
     async fn read_motion(&mut self) -> TouchReadResult {
@@ -269,6 +404,24 @@ impl Touchpad {
             return TouchReadResult::ReadFailed;
         }
 
+        // Finger counts and deltas are trustworthy only while the controller
+        // scans for touch. Low-power transition frames and ATI/re-ATI frames can
+        // retain stale fingers and movement, which previously surfaced as a
+        // phantom scroll after the pad had already been released.
+        let charging_mode = system_info_0 & SYSTEM_INFO_0_CHARGING_MODE;
+        let scanning_for_touch = charging_mode == CHARGING_MODE_ACTIVE || charging_mode == CHARGING_MODE_IDLE_TOUCH;
+        if !scanning_for_touch || (system_info_0 & (SYSTEM_INFO_0_ATI_ERROR | SYSTEM_INFO_0_REATI_OCCURRED)) != 0 {
+            self.clear_motion_state();
+            return TouchReadResult::NoMotion;
+        }
+
+        self.multi_finger_samples = if number_of_fingers >= 2 {
+            self.multi_finger_samples.saturating_add(1)
+        } else {
+            0
+        };
+        let two_fingers_settled = self.multi_finger_samples >= TOUCH_SCROLL_CONFIRM_SAMPLES;
+
         let gestures_enabled = module_settings::touch_gestures_enabled(self.side);
 
         if gestures_enabled && (gesture_0 & (GESTURE_0_SINGLE_TAP | GESTURE_0_PRESS_AND_HOLD)) != 0 {
@@ -280,15 +433,21 @@ impl Touchpad {
             return TouchReadResult::Gesture { buttons: BUTTON_RIGHT };
         }
 
-        if gestures_enabled && ((gesture_1 & GESTURE_1_SCROLL) != 0 || (number_of_fingers >= 2 && (x != 0 || y != 0))) {
+        if gestures_enabled && two_fingers_settled && ((gesture_1 & GESTURE_1_SCROLL) != 0 || x != 0 || y != 0) {
             return match scroll_delta(x, y) {
                 Some((h, v)) => TouchReadResult::Scroll { h, v },
-                None => TouchReadResult::NoMotion,
+                None => TouchReadResult::Contact,
             };
         }
 
-        if number_of_fingers != 1 || (x == 0 && y == 0) {
+        if number_of_fingers == 0 {
             return TouchReadResult::NoMotion;
+        }
+        if number_of_fingers != 1 || (x == 0 && y == 0) {
+            // A stationary finger is still activity. Keeping the host poll at
+            // 8 ms here prevents the first real delta after LP2 from arriving
+            // in a burst of slow, stale samples.
+            return TouchReadResult::Contact;
         }
 
         TouchReadResult::Motion {
@@ -300,10 +459,34 @@ impl Touchpad {
     fn reset(&mut self) {
         let now = Instant::now();
         self.ready = false;
+        self.suspended = false;
         self.read_failures = 0;
+        self.clear_motion_state();
+        self.last_report = Instant::MIN;
+        self.last_activity = Instant::MIN;
+        self.poll_interval = Duration::from_millis(REPORT_RATE_ACTIVE_MS as u64);
+        self.schedule_next_probe(now);
+    }
+
+    async fn deactivate(&mut self) {
+        if self.ready && !self.suspended {
+            self.suspended = self.set_suspend(true).await;
+        }
+        self.ready = false;
+        self.read_failures = 0;
+        self.clear_motion_state();
+        self.last_report = Instant::MIN;
+        self.last_activity = Instant::MIN;
+        self.next_probe = Instant::MIN;
+        self.next_poll = Instant::MIN;
+        self.poll_interval = Duration::from_millis(REPORT_RATE_ACTIVE_MS as u64);
+        self.unavailable_since = None;
+    }
+
+    fn clear_motion_state(&mut self) {
+        self.multi_finger_samples = 0;
         self.acc_x = 0;
         self.acc_y = 0;
-        self.schedule_next_probe(now);
     }
 
     fn schedule_next_probe(&mut self, now: Instant) {
@@ -412,6 +595,7 @@ enum TouchReadResult {
     Motion { x: i16, y: i16 },
     Gesture { buttons: u8 },
     Scroll { h: i16, v: i16 },
+    Contact,
     NoMotion,
     ReadFailed,
 }

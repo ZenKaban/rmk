@@ -144,6 +144,16 @@ impl ModifierCombination {
             .with_right_gui(right_gui)
     }
 
+    /// Check that all modifiers in `required` are active, with left/right
+    /// pairing (QMK key-override semantics): a modifier kind required on both
+    /// sides is satisfied by either side, a kind required on one side needs
+    /// exactly that side. An empty `required` is always satisfied.
+    pub const fn contains_all_paired(self, required: ModifierCombination) -> bool {
+        let req = required.into_bits();
+        let active_req = req & self.into_bits();
+        ((active_req & 0x0F) | (active_req >> 4)) == ((req & 0x0F) | (req >> 4))
+    }
+
     /// Convert current modifier into packed bits:
     ///
     /// | bit4 | bit3 | bit2 | bit1 | bit0 |

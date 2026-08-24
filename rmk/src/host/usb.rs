@@ -1,9 +1,8 @@
 use embassy_futures::select::{Either, select};
 use embassy_usb::class::hid::{HidReaderWriter, ReadError};
 use embassy_usb::driver::{Driver, EndpointError};
-use rmk_types::connection::ConnectionType;
 
-use crate::channel::{HOST_USB_REPLY, enqueue_host_request};
+use crate::channel::{HOST_USB_REPLY, HostTransport, enqueue_host_request};
 
 /// Drives the USB HID Vial endpoint: forwards 32-byte OUT reports into
 /// `HOST_REQUEST_CHANNEL` and writes replies pulled from `HOST_USB_REPLY` back to
@@ -21,7 +20,7 @@ pub(crate) async fn run_usb_host<'d, D: Driver<'d>>(rw: &mut HidReaderWriter<'d,
         HOST_USB_REPLY.clear();
         loop {
             match select(rw.read(&mut buf), HOST_USB_REPLY.receive()).await {
-                Either::First(Ok(_)) => enqueue_host_request(ConnectionType::Usb, buf).await,
+                Either::First(Ok(_)) => enqueue_host_request(HostTransport::Usb, buf).await,
                 Either::First(Err(ReadError::Disabled)) => break,
                 Either::First(Err(e)) => error!("USB host read error: {:?}", e),
                 Either::Second(reply) => match rw.write(&reply).await {

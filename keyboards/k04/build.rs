@@ -1,13 +1,16 @@
-use const_gen::*;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::{env, fs};
+
+use const_gen::*;
 use xz2::read::XzEncoder;
 
 fn main() {
-    const FIRMWARE_VERSION: &str = "0.1.3";
-    const FIRMWARE_VERSION_BCD: &str = "0x0103";
+    const STANDALONE_FIRMWARE_VERSION: &str = "0.1.8";
+    const STANDALONE_FIRMWARE_VERSION_BCD: &str = "0x0108";
+    const QUBE_FIRMWARE_VERSION: &str = "0.1.7";
+    const QUBE_FIRMWARE_VERSION_BCD: &str = "0x0107";
 
     let vial_path = configured_path("VIAL_JSON_PATH", "vial.json");
     let keyboard_path = configured_path("KEYBOARD_TOML_PATH", "keyboard.toml");
@@ -16,18 +19,34 @@ fn main() {
     println!("cargo:rerun-if-env-changed=KEYBOARD_TOML_PATH");
     println!("cargo:rerun-if-changed={}", vial_path.display());
     println!("cargo:rerun-if-changed={}", keyboard_path.display());
-    println!("cargo:rerun-if-changed=memory.x");
-    println!("cargo:rustc-env=RMK_FIRMWARE_VERSION={FIRMWARE_VERSION}");
-    println!("cargo:rustc-env=RMK_FIRMWARE_VERSION_BCD={FIRMWARE_VERSION_BCD}");
-    println!("cargo:rustc-env=RMK_VIAL_DEVICE_SETTINGS_FN=crate::layer_names::vial_device_settings");
+    println!("cargo:rerun-if-changed=memory_halves.x");
+    println!("cargo:rerun-if-changed=memory_qube.x");
+    let product_id = generate_vial_config(&vial_path);
+    validate_keyboard_product_id(&keyboard_path, product_id);
+    validate_topology_feature(product_id);
 
-    generate_vial_config(&vial_path);
+    let (firmware_version, firmware_version_bcd) = if is_standalone(product_id) {
+        (STANDALONE_FIRMWARE_VERSION, STANDALONE_FIRMWARE_VERSION_BCD)
+    } else {
+        (QUBE_FIRMWARE_VERSION, QUBE_FIRMWARE_VERSION_BCD)
+    };
+    println!("cargo:rustc-env=RMK_FIRMWARE_VERSION={firmware_version}");
+    println!("cargo:rustc-env=RMK_FIRMWARE_VERSION_BCD={firmware_version_bcd}");
+
+    if is_standalone(product_id) || env::var_os("CARGO_FEATURE_QUBE").is_some() {
+        println!("cargo:rustc-env=RMK_VIAL_DEVICE_SETTINGS_FN=crate::layer_names::vial_device_settings");
+    }
+    if is_standalone(product_id) {
+        println!("cargo:rustc-env=RMK_BLE_HOST_POWER_CONFIG_FN=crate::layer_names::ble_host_power_config");
+    }
 
     let out = &PathBuf::from(env::var_os("OUT_DIR").unwrap());
-    File::create(out.join("memory.x"))
-        .unwrap()
-        .write_all(include_bytes!("memory.x"))
-        .unwrap();
+    let memory = if env::var_os("CARGO_FEATURE_QUBE").is_some() {
+        include_bytes!("memory_qube.x").as_slice()
+    } else {
+        include_bytes!("memory_halves.x").as_slice()
+    };
+    File::create(out.join("memory.x")).unwrap().write_all(memory).unwrap();
     println!("cargo:rustc-link-search={}", out.display());
 
     println!("cargo:rustc-link-arg=--nmagic");
@@ -42,7 +61,7 @@ fn configured_path(variable: &str, default: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(default))
 }
 
-fn generate_vial_config(vial_path: &Path) {
+fn generate_vial_config(vial_path: &Path) -> u16 {
     let out_file = Path::new(&env::var_os("OUT_DIR").unwrap()).join("config_generated.rs");
 
     let mut content = String::new();
@@ -57,12 +76,18 @@ fn generate_vial_config(vial_path: &Path) {
     let parsed = json::parse(&content).unwrap_or_else(|e| panic!("Cannot parse {}: {e}", vial_path.display()));
     let product_id = parsed["productId"]
         .as_str()
-        .unwrap_or_else(|| panic!("{} has no string productId", vial_path.display()));
+        .and_then(parse_hex_u16)
+        .unwrap_or_else(|| panic!("{} productId must be a hexadecimal string", vial_path.display()));
     let keyboard_id: Vec<u8> = match product_id {
-        "0x0074" => vec![0x80, 0x04, b'K', b'0', b'4', b'F', b'U', b'L'],
-        "0x0075" => vec![0x80, 0x04, b'K', b'0', b'4', b'M', b'I', b'N'],
-        "0x0076" => vec![0x80, 0x04, b'K', b'0', b'4', b'M', b'I', b'C'],
-        _ => panic!("Unsupported K:04 Series productId {product_id}"),
+        // Preserve every established Standalone and Qube identity during the
+        // structural crate consolidation.
+        0x0071 => vec![0x80, 0x04, 0x28, 0xAB, 0x69, 0x3E, 0x19, 0x60],
+        0x0072 => vec![0x80, 0x04, 0x2D, 0x7A, 0x91, 0x44, 0x3B, 0x21],
+        0x0073 => vec![0x80, 0x04, b'Q', b'0', b'4', b'M', b'I', b'C'],
+        0x0074 => vec![0x80, 0x04, b'K', b'0', b'4', b'F', b'U', b'L'],
+        0x0075 => vec![0x80, 0x04, b'K', b'0', b'4', b'M', b'I', b'N'],
+        0x0076 => vec![0x80, 0x04, b'K', b'0', b'4', b'M', b'I', b'C'],
+        _ => panic!("Unsupported K:04 Series productId: 0x{product_id:04X}"),
     };
 
     let vial_cfg = json::stringify(parsed);
@@ -78,4 +103,44 @@ fn generate_vial_config(vial_path: &Path) {
     .map(|s| "#[allow(clippy::redundant_static_lifetimes)]\n".to_owned() + s.as_str())
     .join("\n");
     fs::write(out_file, const_declarations).unwrap();
+
+    product_id
+}
+
+fn validate_keyboard_product_id(keyboard_path: &Path, expected: u16) {
+    let content =
+        fs::read_to_string(keyboard_path).unwrap_or_else(|e| panic!("Cannot read {}: {e}", keyboard_path.display()));
+    let actual = content
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .find_map(|(key, value)| (key.trim() == "product_id").then(|| value.trim()))
+        .and_then(parse_hex_u16)
+        .unwrap_or_else(|| panic!("{} product_id must be a hexadecimal integer", keyboard_path.display()));
+
+    assert_eq!(
+        actual,
+        expected,
+        "{} and selected Vial definition have different product IDs",
+        keyboard_path.display()
+    );
+}
+
+fn validate_topology_feature(product_id: u16) {
+    if env::var_os("CARGO_FEATURE_QUBE").is_some() && !is_qube(product_id) {
+        panic!("The qube feature requires a K:04 Qube profile, got productId 0x{product_id:04X}");
+    }
+}
+
+fn parse_hex_u16(value: &str) -> Option<u16> {
+    let value = value.trim().trim_matches('"');
+    let value = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X"))?;
+    u16::from_str_radix(value, 16).ok()
+}
+
+fn is_qube(product_id: u16) -> bool {
+    matches!(product_id, 0x0071..=0x0073)
+}
+
+fn is_standalone(product_id: u16) -> bool {
+    matches!(product_id, 0x0074..=0x0076)
 }

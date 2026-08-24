@@ -19,6 +19,7 @@ keyboard.subs = 4
 rows = 6
 cols = 6
 layers = 16
+no_action_layer_start = 5
 # op36: 3 rows x 5+5 cols = 30 + 3+3 thumb = 36 total
 # Left: rows 0-2 (cols 0-4 main, col5 = thumb)
 # Right: rows 3-5 (cols 0-4 main, col5 = thumb)
@@ -29,40 +30,42 @@ matrix_map = """
             (0,5) (1,5) (2,5)    (5,5) (4,5) (3,5)
 """
 
+# Common factory layers mirror K:04 Micro. Its two unused inner bottom-row
+# positions and its hardware-specific pointing/encoder actions are omitted.
 [[layer]]
 name = "Base"
 keys = """
-Q     W     E     R     T     Y     U     I     O     P
-A     S     D     F     G     H     J     K     L     Semicolon
-Z     X     C     V     B     N     M     Comma Dot   Quote
-            LCtrl MO(1) Space Enter MO(2) LAlt
+Q           W           E            R           T     Y     U           I            O           P
+MT(A,LGui)  MT(S,LAlt)  MT(D,LShift) MT(F,LCtrl) G     H     MT(J,RCtrl) MT(K,RShift) MT(L,RAlt) MT(Semicolon,RGui)
+Z           X           C            V           B     N     M           Comma        Dot         Quote
+                        Backspace    MO(1)         Space Enter MO(2)       Tab
 """
 
 [[layer]]
 name = "Nav"
 keys = """
-Kc1   Kc2   Kc3   Kc4   Kc5   Kc6   Kc7   Kc8   Kc9   Kc0
-Home  Insert Delete End   Enter _     Left  Down  Up    Right
-_     _      _     _     Delete CapsLock WM(Left,LCtrl) PageDown PageUp WM(Right,LCtrl)
-            _     _     _     _     MO(3) _
+Kc1            Kc2             Kc3               Kc4           Kc5          Kc6      Kc7          Kc8             Kc9         Kc0
+MT(Home,LGui)  MT(Insert,LAlt)  MT(Delete,LShift) MT(End,LCtrl) Enter        Escape   MT(Left,RCtrl) MT(Down,RShift) MT(Up,RAlt) MT(Right,RGui)
+PageDown       PageUp          _                 _             PrintScreen  _        _            _               CapsLock    CapsWordToggle
+                              _                 _             _            _        MO(3)        _
 """
 
 [[layer]]
 name = "Symbols"
 keys = """
-SHIFTED(Kc2) SHIFTED(Comma) Equal SHIFTED(Dot) Grave   SHIFTED(Kc6) LeftBracket Minus RightBracket _
-Backslash SHIFTED(Kc9) Minus SHIFTED(Kc0) SHIFTED(Equal) SHIFTED(Kc5) SHIFTED(LeftBracket) Semicolon SHIFTED(RightBracket) SHIFTED(Kc1)
-_ SHIFTED(Kc8) SHIFTED(Semicolon) Slash SHIFTED(Kc4) SHIFTED(Kc2) SHIFTED(Backslash) SHIFTED(Grave) SHIFTED(Kc7) _
-            _     MO(3) SHIFTED(Kc3) _ _ _
+SHIFTED(Kc2)       SHIFTED(Comma)          Equal                   SHIFTED(Dot)            Grave          SHIFTED(Kc6)  SHIFTED(Quote)                    SHIFTED(Minus)            Quote                  _
+MT(Backslash,LGui) MT(WM(Kc9,LShift),LAlt) MT(Minus,LShift)        MT(WM(Kc0,LShift),LCtrl) SHIFTED(Equal) SHIFTED(Kc5)  MT(WM(LeftBracket,LShift),RCtrl) MT(Semicolon,RShift)      MT(WM(RightBracket,LShift),RAlt) MT(WM(Kc1,LShift),RGui)
+SHIFTED(Kc3)       SHIFTED(Kc8)            SHIFTED(Semicolon)      Slash                   _              _            SHIFTED(Backslash)               SHIFTED(Grave)            SHIFTED(Kc7)            SHIFTED(Kc4)
+                                           _                       MO(3)                   _              _            _                                _
 """
 
 [[layer]]
 name = "Adjust"
 keys = """
-Bootloader F1  F2  F3  F4  User0  User1  User2  User5  User7
-LGui  F5  F6  F7  F8  OutputBluetooth  AudioVolDown  AudioVolUp  AudioMute  LAlt
-_     F9  F10 F11 F12  OutputUsb  MediaPrevTrack  MediaPlayPause  MediaNextTrack  _
-            _  _  _  _  _  _
+Bootloader  F1             F2              F3              F4   User0            User1                   User2                  User3                 User4
+LGui        F5             F6              F7              F8   OutputBluetooth  AudioVolDown            AudioMute             AudioVolUp          User7
+_           F9             F10             F11             F12  OutputUsb        MediaPrevTrack          MediaPlayPause        MediaNextTrack         No
+                                        _  _               _    _                _                       _
 """
 
 [ble]
@@ -93,13 +96,23 @@ col_pins = ["P0_30", "P0_29", "P0_02", "P1_13", "P0_28", "P0_03"]
 
 [rmk]
 split_peripherals_num = 1
+split_pairing_timeout_seconds = 30
+ble_reconnect_timeout_seconds = 60
+ble_pairing_timeout_seconds = 60
 split_central_sleep_timeout_seconds = 120
 combo_max_num = 32
+combo_max_length = 4
+fork_max_num = 8
 morse_max_num = 32
+max_patterns_per_key = 8
 macro_space_size = 2048
 ble_profiles_num = 5
+protocol_max_bulk_size = 8
+protocol_macro_chunk_size = 64
 
 [storage]
+start_addr = 0xCC000
+num_sectors = 32
 clear_storage = false
 
 # Prevent cargo from looking for a workspace above this directory

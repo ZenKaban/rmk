@@ -1,6 +1,7 @@
 #![no_main]
 #![no_std]
 
+mod battery_level;
 mod battery_nrf;
 mod layer_led;
 mod module_settings;
@@ -32,7 +33,7 @@ mod keyboard_peripheral {
 
     #[register_processor(event)]
     fn trackball() -> crate::trackball::Trackball {
-        crate::trackball::Trackball::new(
+        crate::trackball::Trackball::new_peripheral(
             crate::trackball::new_trackball_from_pins(1, p.P0_01, p.P0_00, p.P0_05, p.P1_09),
             1,
         )

@@ -257,6 +257,24 @@ impl KeyMapInner<'_> {
         }
     }
 
+    fn peek_layer_cache(&self, pos: KeyboardEventPos) -> u8 {
+        match pos {
+            KeyboardEventPos::Key(key_pos) => {
+                let ci = self.cache_index(key_pos.row as usize, key_pos.col as usize);
+                self.layer_cache[ci]
+            }
+            KeyboardEventPos::RotaryEncoder(encoder_pos) => {
+                if encoder_pos.direction != Direction::None {
+                    let ci = self.encoder_cache_index(encoder_pos.id as usize, encoder_pos.direction as usize);
+                    if let Some(cache) = self.encoder_layer_cache.get(ci) {
+                        return *cache;
+                    }
+                }
+                self.behavior.default_layer
+            }
+        }
+    }
+
     fn save_layer_cache(&mut self, pos: KeyboardEventPos, layer_num: u8) {
         match pos {
             KeyboardEventPos::Key(key_pos) => {
@@ -418,6 +436,11 @@ impl<'a> KeyMap<'a> {
         self.inner.borrow_mut().get_action_with_layer_cache(event)
     }
 
+    /// The layer that sourced the pressed key's action, per the layer cache.
+    pub(crate) fn source_layer_of(&self, pos: KeyboardEventPos) -> u8 {
+        self.inner.borrow().peek_layer_cache(pos)
+    }
+
     pub(crate) fn get_action_at(&self, pos: KeyboardEventPos, layer: usize) -> KeyAction {
         self.inner.borrow().get_action_at(pos, layer)
     }
@@ -463,7 +486,7 @@ impl<'a> KeyMap<'a> {
     /// layer was already active (or the index is out of range). Folds the
     /// "check then activate" sequence into a single borrow so callers can't
     /// accidentally race against other layer mutations.
-    pub(crate) fn activate_layer_if_inactive(&self, layer_num: u8) -> bool {
+    pub fn activate_layer_if_inactive(&self, layer_num: u8) -> bool {
         let mut inner = self.inner.borrow_mut();
         let idx = layer_num as usize;
         if idx >= inner.num_layer || inner.layer_state[idx] {
@@ -478,7 +501,7 @@ impl<'a> KeyMap<'a> {
     /// deactivates when the layer is currently active. Skips the
     /// `update_tri_layer` call (which would publish a `LayerChangeEvent`) when
     /// the layer is already inactive, avoiding a redundant event publish.
-    pub(crate) fn deactivate_layer_if_active(&self, layer_num: u8) {
+    pub fn deactivate_layer_if_active(&self, layer_num: u8) {
         let mut inner = self.inner.borrow_mut();
         let idx = layer_num as usize;
         if idx >= inner.num_layer || !inner.layer_state[idx] {
@@ -633,6 +656,11 @@ impl<'a> KeyMap<'a> {
         f(&inner.behavior.fork.forks)
     }
 
+    pub(crate) fn with_forks_mut<R>(&self, f: impl FnOnce(&mut [Fork]) -> R) -> R {
+        let mut inner = self.inner.borrow_mut();
+        f(&mut inner.behavior.fork.forks)
+    }
+
     pub(crate) fn with_combos<R>(&self, f: impl FnOnce(&[Option<Combo>]) -> R) -> R {
         let inner = self.inner.borrow();
         f(&inner.behavior.combo.combos)
@@ -742,6 +770,15 @@ impl<'a> KeyMap<'a> {
         if offset < end {
             dst[offset..end].copy_from_slice(&data[..end - offset]);
         }
+    }
+
+    pub(crate) fn macro_buffer_has_terminators(&self, received_end: usize, expected: usize) -> bool {
+        expected > 0
+            && self.inner.borrow().behavior.keyboard_macros.macro_sequences[..received_end.min(MACRO_SPACE_SIZE)]
+                .iter()
+                .filter(|byte| **byte == 0)
+                .count()
+                >= expected
     }
 
     pub(crate) fn reset_macro_buffer(&self) {

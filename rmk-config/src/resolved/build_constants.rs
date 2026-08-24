@@ -44,7 +44,11 @@ pub struct BuildConstants {
     pub report_channel_size: usize,
     pub vial_channel_size: usize,
     pub flash_channel_size: usize,
+    pub keymap_rows: usize,
+    pub keymap_cols: usize,
+    pub keymap_layers: usize,
     pub split_peripherals_num: usize,
+    pub split_central_is_left: bool,
     pub ble_profiles_num: usize,
     pub split_pairing_timeout_seconds: u32,
     pub ble_reconnect_timeout_seconds: u32,
@@ -84,6 +88,22 @@ impl crate::KeyboardTomlConfig {
         } else {
             rmk.split_peripherals_num
         };
+        let split_central_is_left = self
+            .split
+            .as_ref()
+            .filter(|split| split.peripheral.len() == 1)
+            .and_then(|split| {
+                split.peripheral.first().map(|peripheral| {
+                    (split.central.row_offset, split.central.col_offset)
+                        <= (peripheral.row_offset, peripheral.col_offset)
+                })
+            })
+            .unwrap_or(true);
+        let (keymap_rows, keymap_cols, keymap_layers) = self
+            .layout
+            .as_ref()
+            .map(|layout| (layout.rows as usize, layout.cols as usize, layout.layers as usize))
+            .unwrap_or((1, 1, 1));
 
         // Build event channels
         macro_rules! event_channels {
@@ -118,6 +138,7 @@ impl crate::KeyboardTomlConfig {
             peripheral_battery,
             peripheral_battery_refresh,
             peripheral_settings,
+            peripheral_settings_refresh,
             clear_peer,
             dfu_status,
             action,
@@ -200,7 +221,11 @@ impl crate::KeyboardTomlConfig {
             report_channel_size: rmk.report_channel_size,
             vial_channel_size: rmk.vial_channel_size,
             flash_channel_size: rmk.flash_channel_size,
+            keymap_rows,
+            keymap_cols,
+            keymap_layers,
             split_peripherals_num,
+            split_central_is_left,
             ble_profiles_num: rmk.ble_profiles_num,
             split_pairing_timeout_seconds: rmk.split_pairing_timeout_seconds,
             ble_reconnect_timeout_seconds: rmk.ble_reconnect_timeout_seconds,
@@ -253,7 +278,7 @@ fn resolve_passkey_enabled(ble: &crate::BleConfig) -> Result<Passkey, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_passkey_enabled;
+    use super::{BuildConstants, resolve_passkey_enabled};
     use crate::{BleConfig, DEFAULT_PASSKEY_ENTRY_TIMEOUT_SECS, MIN_PASSKEY_ENTRY_TIMEOUT_SECS};
 
     #[test]
@@ -323,6 +348,32 @@ mod tests {
     }
 
     #[test]
+    fn ble_reserves_advertising_timeout_wake_subscribers() {
+        let base = parse("").build_constants(&[]).unwrap();
+        let ble = parse("").build_constants(&["_ble"]).unwrap();
+
+        let subs =
+            |constants: &BuildConstants, event: &str| constants.events.iter().find(|e| e.name == event).unwrap().subs;
+        for event in ["keyboard", "pointing"] {
+            assert_eq!(
+                subs(&ble, event),
+                subs(&base, event) + 1,
+                "{event} needs a wake subscriber slot under _ble"
+            );
+        }
+    }
+
+    #[test]
+    fn split_ble_reserves_sleep_state_followers() {
+        let base = parse("").build_constants(&[]).unwrap();
+        let split_ble = parse("").build_constants(&["split", "_ble"]).unwrap();
+
+        let subs =
+            |constants: &BuildConstants, event: &str| constants.events.iter().find(|e| e.name == event).unwrap().subs;
+        assert_eq!(subs(&split_ble, "sleep_state"), subs(&base, "sleep_state") + 2);
+    }
+
+    #[test]
     fn split_reserves_peripheral_manager_settings_subscribers() {
         let base = parse("").build_constants(&[]).unwrap();
         let split = parse("").build_constants(&["split"]).unwrap();
@@ -340,6 +391,23 @@ mod tests {
             .subs;
 
         assert_eq!(split_subs, base_subs + 2);
+    }
+
+    #[test]
+    fn resolves_split_central_physical_side_from_matrix_offsets() {
+        let left_central = parse(
+            "[split]\nconnection = \"ble\"\n[split.central]\nrows = 4\ncols = 6\nrow_offset = 0\ncol_offset = 0\n[split.central.matrix]\nrow_pins = []\ncol_pins = []\n[[split.peripheral]]\nrows = 4\ncols = 6\nrow_offset = 4\ncol_offset = 0\n[split.peripheral.matrix]\nrow_pins = []\ncol_pins = []\n",
+        )
+        .build_constants(&["split"])
+        .unwrap();
+        let right_central = parse(
+            "[split]\nconnection = \"ble\"\n[split.central]\nrows = 4\ncols = 6\nrow_offset = 4\ncol_offset = 0\n[split.central.matrix]\nrow_pins = []\ncol_pins = []\n[[split.peripheral]]\nrows = 4\ncols = 6\nrow_offset = 0\ncol_offset = 0\n[split.peripheral.matrix]\nrow_pins = []\ncol_pins = []\n",
+        )
+        .build_constants(&["split"])
+        .unwrap();
+
+        assert!(left_central.split_central_is_left);
+        assert!(!right_central.split_central_is_left);
     }
 
     #[test]

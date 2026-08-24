@@ -263,7 +263,7 @@ pub(crate) struct RmkConstantsConfig {
     /// BLE reconnect window for the active bonded host in seconds
     #[serde_inline_default(300)]
     pub ble_reconnect_timeout_seconds: u32,
-    /// BLE pairing window for a new host in seconds (0 = legacy behavior)
+    /// BLE pairing window for an unbonded profile in seconds (0 = use the reconnect window)
     #[serde_inline_default(0)]
     pub ble_pairing_timeout_seconds: u32,
     /// BLE Split Central sleep timeout in seconds (0 = disabled)
@@ -431,6 +431,7 @@ define_event_config!(
     peripheral_battery,
     peripheral_battery_refresh,
     peripheral_settings,
+    peripheral_settings_refresh,
     clear_peer,
     // DFU events
     dfu_status,
@@ -445,6 +446,7 @@ pub(crate) struct LayoutTomlConfig {
     pub rows: u8,
     pub cols: u8,
     pub layers: u8,
+    pub no_action_layer_start: Option<u8>,
     pub keymap: Option<Vec<Vec<Vec<String>>>>, // Will be deprecated in the future
     pub matrix_map: Option<String>,            // Temporarily allow both matrix_map and keymap to be set
     pub encoder_map: Option<Vec<Vec<[String; 2]>>>, // Will be deprecated together with keymap
@@ -976,6 +978,18 @@ pub struct InputDeviceConfig {
     pub iqs5xx: Option<Vec<Iqs5xxConfig>>,
 }
 
+impl InputDeviceConfig {
+    /// Whether this board contains a device whose reports need a low-latency
+    /// split transport. The generated central applies the low-latency profile
+    /// only to the peripheral board that owns this capability.
+    pub fn has_pointing_device(&self) -> bool {
+        self.pointing.as_ref().is_some_and(|devices| !devices.is_empty())
+            || self.pmw3610.as_ref().is_some_and(|devices| !devices.is_empty())
+            || self.pmw33xx.as_ref().is_some_and(|devices| !devices.is_empty())
+            || self.iqs5xx.as_ref().is_some_and(|devices| !devices.is_empty())
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JoystickConfig {
@@ -1260,6 +1274,21 @@ impl KeyboardTomlConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pointing_capability_requires_a_configured_pointing_device() {
+        let empty = InputDeviceConfig {
+            pmw3610: Some(Vec::new()),
+            ..Default::default()
+        };
+        let pointing = InputDeviceConfig {
+            pmw3610: Some(vec![Pmw3610Config::default()]),
+            ..Default::default()
+        };
+
+        assert!(!empty.has_pointing_device());
+        assert!(pointing.has_pointing_device());
+    }
 
     #[test]
     fn test_event_config_default_values() {

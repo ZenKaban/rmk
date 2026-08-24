@@ -125,6 +125,7 @@ async fn main(_spawner: Spawner) {
         start_addr: 0,
         clear_storage: false,
         clear_layout: false,
+        no_action_layer_start: None,
     };
     let mut behavior_config = BehaviorConfig::default();
     let per_key_config = PositionalConfig::default();

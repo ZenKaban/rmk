@@ -66,9 +66,20 @@ fn generate_constants(bc: &BuildConstants) -> String {
         "pub const FLASH_CHANNEL_SIZE: usize = {};",
         bc.flash_channel_size
     ));
+    lines.push(format!("pub const KEYMAP_ROWS: usize = {};", bc.keymap_rows));
+    lines.push(format!("pub const KEYMAP_COLS: usize = {};", bc.keymap_cols));
+    lines.push(format!("pub const KEYMAP_LAYERS: usize = {};", bc.keymap_layers));
+    lines.push(format!(
+        "pub const KEYMAP_STORAGE_ENTRY_COUNT: usize = {};",
+        bc.keymap_rows * bc.keymap_cols * bc.keymap_layers
+    ));
     lines.push(format!(
         "pub const SPLIT_PERIPHERALS_NUM: usize = {};",
         bc.split_peripherals_num
+    ));
+    lines.push(format!(
+        "pub const SPLIT_CENTRAL_IS_LEFT: bool = {};",
+        bc.split_central_is_left
     ));
     lines.push(format!("pub const SPLIT_PRODUCT_ID: u16 = {};", bc.product_id));
     lines.push(format!("pub const NUM_BLE_PROFILE: usize = {};", bc.ble_profiles_num));

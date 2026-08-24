@@ -1,20 +1,19 @@
 use bt_hci::cmd::le::LeSetPhy;
 use bt_hci::controller::ControllerCmdAsync;
 use embassy_futures::join::join;
-use embassy_futures::select::select;
 use embassy_time::{Duration, Timer, with_timeout};
 use rmk_types::connection::ConnectionStatus;
 use trouble_host::prelude::*;
 
 #[cfg(feature = "storage")]
 use super::PeerAddress;
+use crate::ble::sleep::wait_for_input_activity;
 use crate::event::{
-    CentralConnectedEvent, KeyboardEvent, PointingEvent, SleepStateEvent, SplitConnectionState,
-    SplitConnectionStateEvent, SubscribableEvent, publish_event,
+    CentralConnectedEvent, SleepStateEvent, SplitConnectionState, SplitConnectionStateEvent, publish_event,
 };
 use crate::split::driver::{SplitDriverError, SplitReader, SplitWriter};
 use crate::split::peripheral::SplitPeripheral;
-use crate::split::{SPLIT_MESSAGE_MAX_SIZE, SplitMessage};
+use crate::split::{SPLIT_MESSAGE_MAX_SIZE, SplitMessage, encode_split_message};
 use crate::state::update_status;
 
 const SPLIT_COMPANY_ID: u16 = 0xe118;
@@ -116,19 +115,21 @@ impl<'stack, 'server, 'c, P: PacketPool> SplitReader for BleSplitPeripheralDrive
 impl<'stack, 'server, 'c, P: PacketPool> SplitWriter for BleSplitPeripheralDriver<'stack, 'server, 'c, P> {
     async fn write(&mut self, message: &SplitMessage) -> Result<usize, SplitDriverError> {
         let mut buf = [0_u8; SPLIT_MESSAGE_MAX_SIZE];
-        postcard::to_slice(message, &mut buf).map_err(|e| {
+        let encoded = encode_split_message(message, &mut buf).map_err(|e| {
             error!("Postcard serialize split message error: {}", e);
             SplitDriverError::SerializeError
         })?;
-        info!("Writing split message to central: {:?}", message);
+        // Pointing messages can run at 125 Hz. Keep per-packet diagnostics at
+        // trace level so USB logging cannot stall the split transport.
+        trace!("Writing split message to central: {:?}", message);
         self.message_to_central
-            .notify(self.conn, &buf, true)
+            .notify_raw(self.conn, encoded, false)
             .await
             .map_err(|e| {
                 error!("BLE notify error: {:?}", e);
                 SplitDriverError::BleError(1)
             })?;
-        Ok(buf.len())
+        Ok(encoded.len())
     }
 }
 
@@ -208,11 +209,7 @@ pub async fn initialize_nrf_ble_split_peripheral_and_run<'b, 's: 'b, C: Controll
                     publish_event(SplitConnectionStateEvent(SplitConnectionState::Idle));
                     publish_event(SleepStateEvent::new(true));
 
-                    let mut key_wake = KeyboardEvent::subscriber();
-                    let mut pointing_wake = PointingEvent::subscriber();
-                    key_wake.clear();
-                    pointing_wake.clear();
-                    let _ = select(key_wake.next_message_pure(), pointing_wake.next_message_pure()).await;
+                    wait_for_input_activity().await;
 
                     publish_event(SleepStateEvent::new(false));
                     continue;

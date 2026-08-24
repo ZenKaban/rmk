@@ -56,6 +56,20 @@ pub struct PeripheralBatteryEvent {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct PeripheralSettingsEvent(pub [u8; 27]);
 
+/// Ask the keyboard to re-publish its current settings snapshot.
+///
+/// Unlike [`PeripheralSettingsEvent`], this never crosses the split link: the
+/// central raises it locally whenever a peripheral link comes up, because a
+/// peripheral that rebooted on its own starts from hardcoded defaults and the
+/// central would otherwise stay silent until the next settings edit.
+///
+/// Only keyboards that own a settings snapshot subscribe to it, so `subs`
+/// defaults to 0 and publishing compiles away unless a board opts in.
+#[event(channel_size = crate::PERIPHERAL_SETTINGS_REFRESH_EVENT_CHANNEL_SIZE, pubs = crate::PERIPHERAL_SETTINGS_REFRESH_EVENT_PUB_SIZE, subs = crate::PERIPHERAL_SETTINGS_REFRESH_EVENT_SUB_SIZE)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct PeripheralSettingsRefreshEvent;
+
 /// Request a peripheral battery refresh.
 #[cfg(feature = "_ble")]
 #[event(channel_size = crate::PERIPHERAL_BATTERY_REFRESH_EVENT_CHANNEL_SIZE, pubs = crate::PERIPHERAL_BATTERY_REFRESH_EVENT_PUB_SIZE, subs = crate::PERIPHERAL_BATTERY_REFRESH_EVENT_SUB_SIZE)]

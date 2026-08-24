@@ -1,8 +1,11 @@
 //! General rotary encoder
 //!
 //! The rotary encoder implementation is adapted from: <https://github.com/leshow/rotary-encoder-hal/blob/master/src/lib.rs>
+use core::cell::Cell;
 use core::sync::atomic::{AtomicU8, Ordering};
 
+use embassy_sync::blocking_mutex::Mutex as BlockingMutex;
+use embassy_sync::signal::Signal;
 use embedded_hal::digital::InputPin;
 #[cfg(feature = "async_matrix")]
 use embedded_hal_async::digital::Wait;
@@ -15,6 +18,12 @@ use crate::event::KeyboardEvent;
 const MAX_DYNAMIC_ENCODERS: usize = 32;
 const MAX_ENCODER_STEPS: u8 = 8;
 static ENCODER_STEPS: [AtomicU8; MAX_DYNAMIC_ENCODERS] = [const { AtomicU8::new(1) }; MAX_DYNAMIC_ENCODERS];
+// ARMv6-M does not provide atomic read-modify-write operations for `u32`.
+// Keep the shared bitset behind RMK's blocking mutex so every supported
+// target can update it without polling disabled encoder tasks.
+static ENABLED_ENCODERS: BlockingMutex<crate::RawMutex, Cell<u32>> = BlockingMutex::new(Cell::new(u32::MAX));
+static ENCODER_ENABLED_CHANGED: [Signal<crate::RawMutex, ()>; MAX_DYNAMIC_ENCODERS] =
+    [const { Signal::new() }; MAX_DYNAMIC_ENCODERS];
 
 /// Set how many encoder actions are emitted for one physical step.
 ///
@@ -33,6 +42,37 @@ pub fn encoder_steps(id: u8) -> u8 {
         .get(usize::from(id))
         .map(|value| value.load(Ordering::Relaxed))
         .unwrap_or(1)
+}
+
+/// Enable or park one encoder task at runtime.
+///
+/// Encoders are enabled by default so existing generated keyboards retain
+/// their behavior. A disabled encoder waits for this setting to change and
+/// does not poll or wake on its GPIO pins.
+pub fn set_encoder_enabled(id: u8, enabled: bool) -> bool {
+    let Some(changed) = ENCODER_ENABLED_CHANGED.get(usize::from(id)) else {
+        return false;
+    };
+    let bit = 1u32 << u32::from(id);
+    let previous = ENABLED_ENCODERS.lock(|state| {
+        let current = state.get();
+        let previous = current & bit != 0;
+        state.set(if enabled { current | bit } else { current & !bit });
+        previous
+    });
+    if previous != enabled {
+        changed.signal(());
+    }
+    true
+}
+
+/// Return whether an encoder task is currently active.
+pub fn encoder_enabled(id: u8) -> bool {
+    if usize::from(id) >= MAX_DYNAMIC_ENCODERS {
+        return true;
+    }
+    let bit = 1u32 << u32::from(id);
+    ENABLED_ENCODERS.lock(|state| state.get() & bit != 0)
 }
 
 /// Holds current/old state and both [`InputPin`](https://docs.rs/embedded-hal/latest/embedded_hal/digital/trait.InputPin.html)
@@ -100,6 +140,12 @@ impl EncoderStepRepeater {
             self.pending_press = Some(direction);
         }
         Some((direction, false))
+    }
+
+    fn cancel(&mut self) -> Option<Direction> {
+        let pressed = self.pressed_direction.take();
+        *self = Self::default();
+        pressed
     }
 }
 
@@ -341,19 +387,46 @@ impl<
     /// Read a keyboard event from the rotary encoder.
     /// This method is called by the generated InputDevice implementation.
     async fn read_keyboard_event(&mut self) -> KeyboardEvent {
-        // Read until a valid rotary encoder event is detected
-        if let Some((direction, pressed)) = self.step_repeater.next() {
-            if !pressed {
-                embassy_time::Timer::after_millis(5).await;
-            }
-            return KeyboardEvent::rotary_encoder(self.id, direction, pressed);
-        }
-
         loop {
+            if !encoder_enabled(self.id) {
+                if let Some(direction) = self.step_repeater.cancel() {
+                    return KeyboardEvent::rotary_encoder(self.id, direction, false);
+                }
+                let Some(changed) = ENCODER_ENABLED_CHANGED.get(usize::from(self.id)) else {
+                    core::future::pending::<()>().await;
+                    unreachable!();
+                };
+                while !encoder_enabled(self.id) {
+                    changed.wait().await;
+                }
+                // Synchronize the quadrature baseline without emitting the
+                // transition that happened while this module was parked.
+                let _ = self.update();
+            }
+
+            // Read until a valid rotary encoder event is detected.
+            if let Some((direction, pressed)) = self.step_repeater.next() {
+                if !pressed {
+                    embassy_time::Timer::after_millis(5).await;
+                }
+                return KeyboardEvent::rotary_encoder(self.id, direction, pressed);
+            }
+
             #[cfg(feature = "async_matrix")]
             {
+                let enabled_changed = ENCODER_ENABLED_CHANGED.get(usize::from(self.id));
                 let (pin_a, pin_b) = self.pins();
-                embassy_futures::select::select(pin_a.wait_for_any_edge(), pin_b.wait_for_any_edge()).await;
+                let pin_edge = embassy_futures::select::select(pin_a.wait_for_any_edge(), pin_b.wait_for_any_edge());
+                if let Some(changed) = enabled_changed {
+                    if matches!(
+                        embassy_futures::select::select(pin_edge, changed.wait()).await,
+                        embassy_futures::select::Either::Second(_)
+                    ) {
+                        continue;
+                    }
+                } else {
+                    pin_edge.await;
+                }
             }
 
             let direction = self.update();
@@ -425,6 +498,17 @@ mod test {
         assert_eq!(encoder_steps(31), 8);
         assert!(!set_encoder_steps(32, 3));
         assert_eq!(encoder_steps(32), 1);
+    }
+
+    #[test]
+    fn encoder_can_be_parked_and_reenabled() {
+        assert!(encoder_enabled(30));
+        assert!(set_encoder_enabled(30, false));
+        assert!(!encoder_enabled(30));
+        assert!(set_encoder_enabled(30, true));
+        assert!(encoder_enabled(30));
+        assert!(!set_encoder_enabled(32, false));
+        assert!(encoder_enabled(32));
     }
 
     #[test]

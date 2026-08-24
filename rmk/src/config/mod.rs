@@ -1,6 +1,8 @@
 mod behavior;
 #[cfg(feature = "_ble")]
 mod ble_battery;
+#[cfg(feature = "_ble")]
+mod ble_host_power;
 mod device;
 mod positional;
 mod storage;
@@ -12,6 +14,8 @@ pub use behavior::{
 };
 #[cfg(feature = "_ble")]
 pub use ble_battery::BleBatteryConfig;
+#[cfg(feature = "_ble")]
+pub use ble_host_power::BleHostPowerConfig;
 pub use device::{DeviceConfig, RMK_BUILD_INFO};
 pub use positional::{Hand, PositionalConfig};
 pub use storage::StorageConfig;

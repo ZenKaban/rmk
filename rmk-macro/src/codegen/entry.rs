@@ -133,11 +133,26 @@ pub(crate) fn rmk_entry_select(
                     let col = p.cols;
                     let row_offset = p.row_offset;
                     let col_offset = p.col_offset;
+                    // A 125 Hz source needs one connection event per 8 ms
+                    // report. Select that cadence only for the peripheral
+                    // that owns the pointing device; key-only links retain
+                    // the standard 15 ms profile instead of doubling Qube's
+                    // total radio load.
+                    let split_link_profile = if p
+                        .input_device
+                        .as_ref()
+                        .is_some_and(|devices| devices.has_pointing_device())
+                    {
+                        quote! { ::rmk::split::ble::central::SplitLinkProfile::Pointing }
+                    } else {
+                        quote! { ::rmk::split::ble::central::SplitLinkProfile::Keyboard }
+                    };
                     tasks.push(quote! {
-                        ::rmk::split::central::run_peripheral_manager::<#row, #col, #row_offset, #col_offset, _>(
+                        ::rmk::split::central::run_peripheral_manager_with_profile::<#row, #col, #row_offset, #col_offset, _>(
                             #idx,
                             &peripheral_addrs,
                             &stack,
+                            #split_link_profile,
                         )
                     });
                 });
@@ -148,11 +163,6 @@ pub(crate) fn rmk_entry_select(
                 tasks.push(quote! {
                     ::rmk::split::ble::central::run_split_connection_supervisor()
                 });
-                if split_config.peripheral.len() > 1 {
-                    tasks.push(quote! {
-                        ::rmk::split::ble::central::run_split_power_state_manager()
-                    });
-                }
                 let joined = join_all_tasks(tasks);
                 quote! {
                     #transport_prelude
@@ -285,7 +295,11 @@ fn transport_setup(communication: &CommunicationConfig) -> (TokenStream2, Vec<To
         CommunicationConfig::Ble(_) => {
             let prelude = quote! {
                 #wpm_prelude
-                let mut ble_transport = ::rmk::ble::BleTransport::new(&stack, rmk_config).await;
+                let mut ble_transport = ::rmk::ble::BleTransport::new_with_host_power_config(
+                    &stack,
+                    rmk_config,
+                    ble_host_power_config,
+                ).await;
             };
             (prelude, vec![quote! { ble_transport.run() }, wpm_task])
         }
@@ -293,7 +307,11 @@ fn transport_setup(communication: &CommunicationConfig) -> (TokenStream2, Vec<To
             let prelude = quote! {
                 #wpm_prelude
                 let mut usb_transport = ::rmk::usb::UsbTransport::new(driver, rmk_config.device_config);
-                let mut ble_transport = ::rmk::ble::BleTransport::new(&stack, rmk_config).await;
+                let mut ble_transport = ::rmk::ble::BleTransport::new_with_host_power_config(
+                    &stack,
+                    rmk_config,
+                    ble_host_power_config,
+                ).await;
             };
             (
                 prelude,

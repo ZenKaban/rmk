@@ -90,7 +90,8 @@ pub(crate) fn to_via_keycode(key_action: KeyAction) -> u16 {
                     0
                 }
             },
-            Action::User(id) => (id as u16 & 0x3F) | 0x7E00,
+            Action::User(id) if id < 64 => id as u16 | 0x7E00,
+            Action::User(_) => 0,
             _ => {
                 warn!("Action: {:?} in vial is not supported yet", a);
                 0
@@ -645,6 +646,11 @@ mod test {
         // User63 (QK_KB_63)
         let a = KeyAction::Single(Action::User(63));
         assert_eq!(0x7E3F, to_via_keycode(a));
+
+        // Upper-half user IDs are reserved for native extensions and must be
+        // preserved through the lossless Ergohaven key-action protocol.
+        let a = KeyAction::Single(Action::User(0x90));
+        assert_eq!(0, to_via_keycode(a));
 
         // ClearEeprom (QK_CLEAR_EEPROM)
         let a = KeyAction::Single(Action::KeyboardControl(KeyboardAction::ClearEeprom));

@@ -95,8 +95,17 @@ impl<S: SplitWriter + SplitReader> SplitPeripheral<S> {
         let mut pointing_sub = PointingEvent::subscriber();
         #[cfg(feature = "_ble")]
         let mut battery_sub = BatteryStatusEvent::subscriber();
+        let mut pending_pointing = None;
 
         loop {
+            if let Some(event) = pending_pointing.take() {
+                let (event, pending) = coalesce_queued_pointing(event, || pointing_sub.try_next_message_pure());
+                pending_pointing = pending;
+                trace!("Writing pending split pointing message to central");
+                self.split_driver.write(&SplitMessage::Pointing(event)).await.ok();
+                continue;
+            }
+
             let read_message_to_send = async {
                 crate::select_biased_with_feature! {
                     e = key_sub.next_message_pure().fuse() => SplitMessage::Key(e),
@@ -106,7 +115,12 @@ impl<S: SplitWriter + SplitReader> SplitPeripheral<S> {
                             level: None,
                         }.into())
                     },
-                    e = pointing_sub.next_message_pure().fuse() => SplitMessage::Pointing(e),
+                    e = pointing_sub.next_message_pure().fuse() => {
+                        let (event, pending) =
+                            coalesce_queued_pointing(e, || pointing_sub.try_next_message_pure());
+                        pending_pointing = pending;
+                        SplitMessage::Pointing(event)
+                    },
                     with_feature("_ble"): e = battery_sub.next_event().fuse() => SplitMessage::BatteryStatus(e),
                 }
             };
@@ -254,10 +268,26 @@ impl<S: SplitWriter + SplitReader> SplitPeripheral<S> {
                     }
                 },
                 Either::Second(e) => {
-                    debug!("Writing split message {:?} to central", e);
+                    if matches!(e, SplitMessage::Pointing(_)) {
+                        trace!("Writing split pointing message to central");
+                    } else {
+                        debug!("Writing split message {:?} to central", e);
+                    }
                     self.split_driver.write(&e).await.ok();
                 }
             }
         }
     }
+}
+
+fn coalesce_queued_pointing(
+    mut event: PointingEvent,
+    mut next: impl FnMut() -> Option<PointingEvent>,
+) -> (PointingEvent, Option<PointingEvent>) {
+    while let Some(candidate) = next() {
+        if !event.merge_relative_xy(&candidate) {
+            return (event, Some(candidate));
+        }
+    }
+    (event, None)
 }

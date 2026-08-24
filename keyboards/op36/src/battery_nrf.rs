@@ -13,9 +13,8 @@ use embassy_nrf::saadc::{self, Input as _, Saadc};
 use embassy_nrf::{bind_interrupts, Peri};
 use embassy_time::{with_timeout, Duration, Timer};
 use rmk::core_traits::Runnable;
-use rmk::event::{
-    publish_event, BatteryStatusEvent, EventSubscriber, PeripheralBatteryRefreshEvent, SubscribableEvent,
-};
+use rmk::event::{EventSubscriber, PeripheralBatteryRefreshEvent, SubscribableEvent};
+use rmk::input_device::battery::publish_battery_status;
 use rmk::processor::Processor;
 use rmk::types::battery::{BatteryStatus, ChargeState};
 
@@ -59,10 +58,10 @@ impl Op36Battery {
             }
             Err(_) => 0,
         };
-        publish_event(BatteryStatusEvent(BatteryStatus::Available {
+        publish_battery_status(BatteryStatus::Available {
             charge_state: ChargeState::Unknown,
             level: Some(level),
-        }));
+        });
     }
 }
 

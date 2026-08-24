@@ -27,7 +27,7 @@ use crate::AUTO_MOUSE_LAYER_MAX_NUM;
 use crate::config::AutoMouseLayerConfig;
 use crate::core_traits::Runnable;
 use crate::event::{
-    ActionEvent, Axis, AxisValType, EventSubscriber, LayerChangeEvent, PointingEvent, SubscribableEvent,
+    ActionEvent, AutoMouseLayerConfigEvent, EventSubscriber, LayerChangeEvent, PointingEvent, SubscribableEvent,
 };
 use crate::keymap::KeyMap;
 use crate::processor::Processor;
@@ -42,7 +42,7 @@ use crate::processor::Processor;
 /// Construct with [`AutoMouseLayerRunner::new`] and pass to `run_all!`. If the keymap has no
 /// auto mouse layer configured (or every entry's layer is out of range), [`Runnable::run`] parks
 /// forever on [`core::future::pending`] so it can sit alongside the other tasks without doing anything.
-#[processor(subscribe = [PointingEvent, LayerChangeEvent])]
+#[processor(subscribe = [PointingEvent, LayerChangeEvent, AutoMouseLayerConfigEvent])]
 #[::rmk::macros::runnable_generated]
 pub struct AutoMouseLayerRunner<'a, 'k> {
     keymap: &'a KeyMap<'k>,
@@ -77,6 +77,7 @@ impl<'a, 'k> AutoMouseLayerRunner<'a, 'k> {
             if entries
                 .push(EntryState {
                     config,
+                    enabled: true,
                     self_activated: false,
                     deadline: None,
                     overlap_warned: false,
@@ -100,6 +101,9 @@ impl<'a, 'k> AutoMouseLayerRunner<'a, 'k> {
         let Some(idx) = match_entry(&self.entries, event.device_id) else {
             return;
         };
+        if !self.entries[idx].enabled {
+            return;
+        }
         if !is_cursor_motion(&event, self.entries[idx].config.threshold) {
             return;
         }
@@ -141,12 +145,33 @@ impl<'a, 'k> AutoMouseLayerRunner<'a, 'k> {
             self.keymap.deactivate_layer_if_active(layer);
         }
     }
+
+    async fn on_auto_mouse_layer_config_event(&mut self, event: AutoMouseLayerConfigEvent) {
+        let Some(idx) = match_entry(&self.entries, event.device_id) else {
+            return;
+        };
+        if event.target_layer as usize >= self.keymap.num_layer() {
+            warn!(
+                "auto_mouse_layer: runtime target_layer {} is out of range (keymap has {} layers); update for device {} ignored",
+                event.target_layer,
+                self.keymap.num_layer(),
+                event.device_id
+            );
+            return;
+        }
+
+        if let Some(previous_layer) = runtime_config_step(&mut self.entries, idx, event, Instant::now()) {
+            self.keymap.deactivate_layer_if_active(previous_layer);
+        }
+    }
 }
 
 /// Per-entry runtime state.
 #[derive(Clone)]
 struct EntryState {
     config: AutoMouseLayerConfig,
+    /// Runtime gate controlled by [`AutoMouseLayerConfigEvent`].
+    enabled: bool,
     /// `true` while this entry is holding the layer active. Multiple entries
     /// may hold the same layer simultaneously when they share `target_layer`.
     self_activated: bool,
@@ -223,6 +248,38 @@ fn assert_action_event_subscriber_available(any_action_event_configured: bool) {
 
 fn earliest_deadline(entries: &[EntryState]) -> Option<Instant> {
     entries.iter().filter_map(|e| e.deadline).min()
+}
+
+/// Apply a runtime update and return the old layer when the caller must
+/// release it. Keeping this state transition pure makes disabling or moving a
+/// live entry testable independently from the async runner.
+fn runtime_config_step(
+    entries: &mut [EntryState],
+    idx: usize,
+    event: AutoMouseLayerConfigEvent,
+    now: Instant,
+) -> Option<u8> {
+    let previous_layer = entries[idx].config.target_layer;
+    let target_changed = previous_layer != event.target_layer;
+    let release_previous = entries[idx].self_activated && (!event.enabled || target_changed);
+    if release_previous {
+        entries[idx].self_activated = false;
+        entries[idx].deadline = None;
+        entries[idx].overlap_warned = false;
+    }
+    let deactivate_previous = release_previous && !layer_still_held(entries, previous_layer);
+
+    let timeout = Duration::from_millis(u64::from(event.timeout_ms.max(1)));
+    let entry = &mut entries[idx];
+    entry.enabled = event.enabled;
+    entry.config.target_layer = event.target_layer;
+    entry.config.timeout = timeout;
+    entry.config.threshold = event.threshold.max(1);
+    if entry.self_activated {
+        entry.deadline = Some(now + timeout);
+    }
+
+    deactivate_previous.then_some(previous_layer)
 }
 
 /// Find the entry that should handle an event from `device_id`.
@@ -365,22 +422,18 @@ fn extend_deadline(entry: &mut EntryState, now: Instant, timeout: Duration) {
 /// Only relative X/Y axis deltas count as cursor motion. Scroll-only events
 /// (Z/H/V) do not activate the layer.
 ///
-/// Absolute-position axes ([`AxisValType::Abs`], e.g. analogue joysticks) are
+/// Absolute-position axes ([`crate::event::AxisValType::Abs`], e.g. analogue joysticks) are
 /// also ignored here: their `value` reports the current position rather than a
 /// delta, so a stick held off-centre would keep the layer pinned on forever.
 /// Absolute pointing devices need to be converted to relative deltas upstream.
 fn is_cursor_motion(event: &PointingEvent, threshold: u16) -> bool {
-    event.axes.iter().any(|axis| {
-        matches!(axis.typ, AxisValType::Rel)
-            && matches!(axis.axis, Axis::X | Axis::Y)
-            && axis.value.unsigned_abs() >= threshold
-    })
+    event.has_relative_xy_motion(threshold)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::{AxisEvent, AxisValType};
+    use crate::event::{Axis, AxisEvent, AxisValType};
 
     fn axis(axis: Axis, value: i16) -> AxisEvent {
         AxisEvent {
@@ -417,6 +470,7 @@ mod tests {
                 extra_mouse_keys: &[],
                 reset_timeout_on_key: false,
             },
+            enabled: true,
             self_activated: false,
             deadline: None,
             overlap_warned: false,
@@ -535,6 +589,59 @@ mod tests {
     fn match_entry_returns_none_when_no_match_and_no_fallback() {
         let entries = [entry(Some(1)), entry(Some(2))];
         assert_eq!(match_entry(&entries, 7), None);
+    }
+
+    fn runtime_event(enabled: bool, target_layer: u8, timeout_ms: u32, threshold: u16) -> AutoMouseLayerConfigEvent {
+        AutoMouseLayerConfigEvent {
+            device_id: 1,
+            enabled,
+            target_layer,
+            timeout_ms,
+            threshold,
+        }
+    }
+
+    #[test]
+    fn runtime_config_disables_and_releases_a_held_layer() {
+        let mut entries = [active_entry(Some(1), 4)];
+        entries[0].deadline = Some(at(1_000));
+
+        let released = runtime_config_step(&mut entries, 0, runtime_event(false, 4, 500, 2), at(100));
+
+        assert_eq!(released, Some(4));
+        assert!(!entries[0].enabled);
+        assert!(!entries[0].self_activated);
+        assert!(entries[0].deadline.is_none());
+    }
+
+    #[test]
+    fn runtime_config_updates_the_exact_deadline_of_a_held_layer() {
+        let mut entries = [active_entry(Some(1), 4)];
+        entries[0].deadline = Some(at(1_000));
+
+        let released = runtime_config_step(&mut entries, 0, runtime_event(true, 4, 250, 2), at(100));
+
+        assert_eq!(released, None);
+        assert!(entries[0].enabled);
+        assert!(entries[0].self_activated);
+        assert_eq!(entries[0].deadline, Some(at(350)));
+        assert_eq!(entries[0].config.timeout, Duration::from_millis(250));
+        assert_eq!(entries[0].config.threshold, 2);
+    }
+
+    #[test]
+    fn runtime_config_moves_a_held_entry_without_leaving_the_old_layer_owned() {
+        let mut entries = [active_entry(Some(1), 4)];
+        entries[0].deadline = Some(at(1_000));
+
+        let released = runtime_config_step(&mut entries, 0, runtime_event(true, 6, 500, 0), at(100));
+
+        assert_eq!(released, Some(4));
+        assert!(entries[0].enabled);
+        assert!(!entries[0].self_activated);
+        assert!(entries[0].deadline.is_none());
+        assert_eq!(entries[0].config.target_layer, 6);
+        assert_eq!(entries[0].config.threshold, 1);
     }
 
     fn active_entry(device_id: Option<u8>, target_layer: u8) -> EntryState {

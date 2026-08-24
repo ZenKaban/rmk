@@ -40,6 +40,7 @@ pub(crate) fn expand_registered_processor_init(
             };
 
             let (custom_init, custom_exec) = expand_custom_processor(item_fn);
+            let cfg_predicates = processor_cfg_predicates(item_fn);
             let mut mode: Option<bool> = None; // Some(true) = event, Some(false) = poll
 
             attr.parse_nested_meta(|meta| {
@@ -57,14 +58,34 @@ pub(crate) fn expand_registered_processor_init(
             })
             .unwrap_or_else(|e| panic!("#[register_processor] {e}"));
 
-            let executor = match mode {
+            let executor_body = match mode {
                 Some(true) => quote! {
-                    async { use ::rmk::processor::Processor; #custom_exec.process_loop().await }
+                    use ::rmk::processor::Processor;
+                    #custom_exec.process_loop().await
                 },
                 Some(false) => quote! {
-                    async { use ::rmk::processor::PollingProcessor; #custom_exec.polling_loop().await }
+                    use ::rmk::processor::PollingProcessor;
+                    #custom_exec.polling_loop().await
                 },
                 None => panic!("#[register_processor] requires `event` or `poll` argument"),
+            };
+            let executor = if cfg_predicates.is_empty() {
+                quote! {
+                    async { #executor_body }
+                }
+            } else {
+                quote! {
+                    async {
+                        #[cfg(all(#(#cfg_predicates),*))]
+                        {
+                            #executor_body
+                        }
+                        #[cfg(not(all(#(#cfg_predicates),*)))]
+                        {
+                            ::core::future::pending::<()>().await
+                        }
+                    }
+                }
             };
 
             initializers.extend(custom_init);
@@ -166,13 +187,34 @@ fn create_dfu_led_processor(
 
 fn expand_custom_processor(fn_item: &syn::ItemFn) -> (TokenStream, &syn::Ident) {
     let task_name = &fn_item.sig.ident;
+    let cfg_attrs = fn_item
+        .attrs
+        .iter()
+        .filter(|attr| attr.path().is_ident("cfg"));
 
     let content = &fn_item.block.stmts;
     let initializer = quote! {
+        #(#cfg_attrs)*
         let mut #task_name = {
             #(#content)*
         };
     };
 
     (initializer, task_name)
+}
+
+fn processor_cfg_predicates(fn_item: &syn::ItemFn) -> Vec<TokenStream> {
+    fn_item
+        .attrs
+        .iter()
+        .filter_map(|attr| {
+            if !attr.path().is_ident("cfg") {
+                return None;
+            }
+            let syn::Meta::List(meta) = &attr.meta else {
+                panic!("#[cfg] on #[register_processor] must contain a predicate");
+            };
+            Some(meta.tokens.clone())
+        })
+        .collect()
 }

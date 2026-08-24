@@ -22,6 +22,10 @@ pub(crate) fn expand_flash_init(hardware: &Hardware) -> TokenStream2 {
     let _start_addr = storage.start_addr;
     let clear_storage = storage.clear_storage;
     let clear_layout = storage.clear_layout;
+    let no_action_layer_start = match storage.no_action_layer_start {
+        Some(layer) => quote! { Some(#layer) },
+        None => quote! { None },
+    };
 
     // With dfu, the flash is already a partition that starts at the
     // storage offset, so the relative offset must be 0.
@@ -35,7 +39,8 @@ pub(crate) fn expand_flash_init(hardware: &Hardware) -> TokenStream2 {
             num_sectors: #num_sectors,
             start_addr: #storage_start_addr,
             clear_storage: #clear_storage,
-            clear_layout: #clear_layout
+            clear_layout: #clear_layout,
+            no_action_layer_start: #no_action_layer_start,
         };
     };
     flash_init.extend(

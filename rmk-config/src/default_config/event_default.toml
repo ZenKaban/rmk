@@ -97,6 +97,12 @@ channel_size = 2
 pubs = 2
 subs = 3
 
+# Opt-in: only keyboards that own a settings snapshot subscribe and answer.
+[event.peripheral_settings_refresh]
+channel_size = 1
+pubs = 1
+subs = 0
+
 [event.clear_peer]
 channel_size = 1
 pubs = 1

@@ -116,6 +116,12 @@ impl<const ROW: usize, const COL: usize, const ROW_OFFSET: usize, const COL_OFFS
         #[cfg(feature = "display")]
         let mut sleep_sub = crate::event::SleepStateEvent::subscriber();
 
+        // A peripheral that rebooted on its own comes up on hardcoded defaults,
+        // and no settings edit may ever follow to correct it. Ask the keyboard
+        // to re-publish its snapshot — after `settings_sub` exists, so the
+        // answer lands in our subscriber instead of being dropped.
+        publish_event(crate::event::PeripheralSettingsRefreshEvent);
+
         // Send the current state once on startup so the peripheral matches us
         // even when no transition has happened since the central booted.
         if self

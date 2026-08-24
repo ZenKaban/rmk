@@ -1,77 +1,58 @@
 # Ergohaven RMK Firmware
 
-RMK BLE split firmware for Ergohaven keyboards and trackballs (nRF52840).
+Firmware for Ergohaven nRF52840 keyboards and Qube configurations. Built on
+[RMK](https://github.com/HaoboGu/rmk).
 
-## Supported Devices
+Ready-to-flash UF2 files are available on the
+[Releases](https://github.com/ergohaven/rmk/releases) page.
 
-### Keyboards (BLE split)
+## Supported Hardware
 
-| Keyboard    | Layout         | Encoders | Trackball |
-|-------------|----------------|----------|-----------|
-| K:03        | 5×6 + 5 thumb  | 3+3      | —         |
-| K:04 Series | K:04 / Mini / Micro | 1+1 | —         |
-| K:04 Series + Qube | K:04 / Mini / Micro | 1+1 | Qube dongle + ST7789 |
-| Imperial44  | 4×6 + 3 thumb  | 1+1      | —         |
-| OP36        | 3×5 + 3 thumb  | —        | —         |
-| Classic splits + Qube | K:03 / Velvet / Imperial44 / OP36 | model-specific | Qube dongle + ST7789 |
-| Velvet      | 4×6 + 5 thumb  | —        | —         |
-| Velvet UI   | 4×6 + 5 thumb  | —        | PMW3610   |
+- Keyboards: K:03, K:04, K:04 Mini, K:04 Micro, Imperial44, OP36, and Velvet
+- Qube: K:03, K:04 Series, Imperial44, OP36, and Velvet
 
-### Trackballs (standalone BLE)
+## Build
 
-| Device              | Buttons | Modes                          |
-|---------------------|---------|--------------------------------|
-| Trackball Royale     | 6       | Normal, Scroll, Sniper, Adjust |
-| Trackball Mini v3.1 | 4       | Normal, Scroll, Sniper, Adjust |
-| Trackball Mini v3.0 | 2       | Normal, Scroll, Sniper, Adjust |
-
-### Tools
-
-| Tool           | Description                              |
-|----------------|------------------------------------------|
-| settings_reset | Erases keymap and BLE bonds, resets to bootloader |
-
-## Building
+Each firmware package is in `keyboards/`. For example:
 
 ```sh
 cd keyboards/k03
-cargo build --release --bin central
-cargo build --release --bin peripheral
+cargo build --release --bin central --bin peripheral
 ```
 
-Current K:04/OP36 regression matrix:
+Build every K:04 Series configuration with:
 
 ```sh
 ./scripts/build_k04_matrix.sh
 ```
 
-## Flashing
+Production targets are defined in
+[`.github/workflows/build.yml`](.github/workflows/build.yml). Shared firmware
+rules are documented in
+[`docs/ergohaven-firmware-profile.md`](docs/ergohaven-firmware-profile.md).
 
-1. Put device into bootloader (double-tap reset)
-2. Copy `.uf2` file to the mounted USB drive
-3. For split keyboards: flash central and peripheral separately
+## Flash
 
-## Settings Reset
+1. Double-tap reset to enter the bootloader.
+2. Copy the correct `.uf2` file to the mounted USB drive.
+3. Flash both halves of a standalone split, or the Qube dongle and both halves
+   of a Qube configuration.
 
-Flash `settings_reset.uf2` to erase all saved keymap/BLE data, then re-flash keyboard firmware.
+## Reset and Migration
 
-## CI
+Use `settings_reset.uf2` for keyboard halves, or `settings_reset_qube.uf2` for
+a Qube dongle. Re-flash the normal firmware after the reset.
 
-Every push builds all devices in parallel via GitHub Actions. UF2 artifacts available as build downloads.
+The one-time `storage_migrate` utilities preserve settings from older
+non-K:04 firmware. Upgrade details and the Velvet exception are documented in
+the [firmware profile](docs/ergohaven-firmware-profile.md#storage-and-reset).
 
-## Releases
+## Checks
 
-Packaged UF2 firmware is published on the
-[GitHub Releases](https://github.com/ergohaven/rmk/releases) page. The current
-firmware release is `v0.1.3`.
+```sh
+./scripts/check_ergohaven_profile.sh
+./scripts/test_all.sh
+```
 
-## RMK Version
-
-Based on [RMK](https://github.com/HaoboGu/rmk) 0.8.2 with nRF52840 BLE support.
-
-The root `rmk`, `rmk-macro`, `rmk-types`, and `rmk-config` crates are the
-source of truth for firmware targets in this repository. K:04 without Qube
-and K:04 with Qube each build K:04, Mini, and Micro profiles from one shared
-crate. They use the same BLE split connection engine; only the central topology
-differs: a central with a local matrix and one peripheral, or a matrix-less
-Qube central with two peripheral halves.
+GitHub Actions validates production profiles and builds all supported devices
+on every push and pull request.

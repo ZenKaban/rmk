@@ -20,6 +20,7 @@ pub struct Storage {
     pub num_sectors: u8,
     pub clear_storage: bool,
     pub clear_layout: bool,
+    pub no_action_layer_start: Option<u8>,
 }
 
 /// Resolved DFU partition config
@@ -61,6 +62,7 @@ impl crate::KeyboardTomlConfig {
                 num_sectors: storage_toml.num_sectors.unwrap_or(2),
                 clear_storage: storage_toml.clear_storage.unwrap_or(false),
                 clear_layout: storage_toml.clear_layout.unwrap_or(false),
+                no_action_layer_start: self.layout.as_ref().and_then(|layout| layout.no_action_layer_start),
             })
         } else {
             None

@@ -11,9 +11,13 @@ use rmk_types::keycode::HidKeyCode;
 use usbd_hid::descriptor::MouseReport;
 
 use crate::channel::send_hid_report;
+use crate::core_traits::Runnable;
 #[cfg(feature = "split")]
 use crate::event::{ActionEvent, KeyboardEvent, PeripheralSettingsEvent};
-use crate::event::{Axis, AxisEvent, AxisValType, PointingEvent, PointingProcessorEvent, PointingSetCpiEvent};
+use crate::event::{
+    Axis, AxisEvent, AxisValType, EventSubscriber, PointingEvent, PointingProcessorEvent, PointingSetCpiEvent,
+    PointingTransformEvent, SubscribableEvent, publish_event,
+};
 use crate::hid::{KeyboardReport, Report};
 use crate::keymap::KeyMap;
 
@@ -73,6 +77,7 @@ pub enum InitState {
 /// This device publishes `PointingEvent` events with relative X/Y movement.
 #[processor(subscribe = [PointingSetCpiEvent])]
 #[input_device(publish = PointingEvent)]
+#[::rmk::macros::runnable_generated]
 pub struct PointingDevice<S: PointingDriver> {
     pub sensor: S,
     pub init_state: InitState,
@@ -83,6 +88,25 @@ pub struct PointingDevice<S: PointingDriver> {
     pub last_report: Instant,
     pub accumulated_x: i32,
     pub accumulated_y: i32,
+}
+
+// Pointing motion is real-time state, not a lossless command stream. Using the
+// generic input-device backpressure path lets a temporarily busy BLE split
+// sender build a FIFO of stale 125 Hz samples. K:04 deliberately publishes its
+// PMW3610 motion immediately for the same reason: keep the newest motion and
+// let lagging subscribers skip obsolete samples.
+impl<S: PointingDriver> Runnable for PointingDevice<S> {
+    async fn run(&mut self) -> ! {
+        use embassy_futures::select::{Either, select};
+
+        let mut cpi_sub = PointingSetCpiEvent::subscriber();
+        loop {
+            match select(self.read_pointing_event(), cpi_sub.next_event()).await {
+                Either::First(event) => publish_event(event),
+                Either::Second(event) => self.on_pointing_set_cpi_event(event).await,
+            }
+        }
+    }
 }
 
 impl<S: PointingDriver> PointingDevice<S> {
@@ -153,11 +177,14 @@ impl<S: PointingDriver> PointingDevice<S> {
             return None;
         }
 
-        let dx = self.accumulated_x.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-        let dy = self.accumulated_y.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        // A HID mouse report can carry only i8 motion. Emit one transport-safe
+        // chunk and preserve the residual for subsequent 125 Hz reports; zeroing
+        // the full accumulator here silently discarded fast PMW3610 movement.
+        let dx = self.accumulated_x.clamp(i8::MIN as i32, i8::MAX as i32) as i16;
+        let dy = self.accumulated_y.clamp(i8::MIN as i32, i8::MAX as i32) as i16;
 
-        self.accumulated_x = 0;
-        self.accumulated_y = 0;
+        self.accumulated_x -= i32::from(dx);
+        self.accumulated_y -= i32::from(dy);
 
         Some(PointingEvent {
             device_id: self.id,
@@ -204,7 +231,7 @@ impl<S: PointingDriver> PointingDevice<S> {
     // ¦                 >- Event returned  ¦
     // +------------------------------------+
     async fn read_pointing_event(&mut self) -> PointingEvent {
-        use embassy_futures::select::{select, Either};
+        use embassy_futures::select::{Either, select};
 
         if self.last_poll == Instant::MIN {
             self.last_poll = Instant::now();
@@ -214,6 +241,17 @@ impl<S: PointingDriver> PointingDevice<S> {
         }
 
         loop {
+            // `wait_for_low()` completes immediately while MOTION remains
+            // asserted. Check the report deadline before polling again so a
+            // continuously moving sensor cannot starve its own reports.
+            if (self.accumulated_x != 0 || self.accumulated_y != 0)
+                && self.last_report.elapsed() >= self.report_interval
+                && let Some(event) = self.take_report_event()
+            {
+                self.last_report = Instant::now();
+                return event;
+            }
+
             let poll_wait = async {
                 if let Some(gpio) = self.sensor.motion_gpio() {
                     let _ = gpio.wait_for_low().await;
@@ -261,6 +299,8 @@ impl<S: PointingDriver> PointingDevice<S> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum PointingMode {
+    /// Ignore motion from the pointing device.
+    Disabled,
     /// Default cursor mode - XY maps to mouse XY movement
     Cursor(CursorConfig),
     /// Scroll mode - XY maps to wheel (vertical) and pan (horizontal)
@@ -274,6 +314,62 @@ pub enum PointingMode {
 impl Default for PointingMode {
     fn default() -> Self {
         Self::Cursor(CursorConfig::default())
+    }
+}
+
+/// Tracks momentary and sticky pointing-mode key selections.
+///
+/// Without sticky mode a selection is active only while its key is held. With
+/// sticky mode every press latches the selected mode, another mode replaces
+/// it, and pressing the latched mode again returns to the configured mode.
+#[derive(Clone, Copy)]
+pub struct PointingModeKeyState<M> {
+    held: Option<M>,
+    latched: Option<M>,
+}
+
+impl<M> PointingModeKeyState<M> {
+    /// Create an inactive mode-key state.
+    pub const fn new() -> Self {
+        Self {
+            held: None,
+            latched: None,
+        }
+    }
+}
+
+impl<M> Default for PointingModeKeyState<M> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<M: Copy + PartialEq> PointingModeKeyState<M> {
+    /// Current key-selected override, if any.
+    pub fn mode_override(&self) -> Option<M> {
+        self.held.or(self.latched)
+    }
+
+    /// Apply one press or release of a pointing-mode key.
+    pub fn handle(&mut self, mode: M, pressed: bool, sticky: bool) {
+        if pressed {
+            if sticky {
+                self.held = None;
+                self.latched = if self.latched == Some(mode) { None } else { Some(mode) };
+            } else {
+                self.latched = None;
+                self.held = Some(mode);
+            }
+        } else if self.held == Some(mode) {
+            self.held = None;
+        }
+    }
+
+    /// Drop a latched selection when sticky mode is disabled in settings.
+    pub fn set_sticky_enabled(&mut self, enabled: bool) {
+        if !enabled {
+            self.latched = None;
+        }
     }
 }
 
@@ -565,7 +661,6 @@ const QUBE_USER_RIGHT_SCROLL: u8 = 35;
 const QUBE_USER_RIGHT_TEXT: u8 = 36;
 const QUBE_SETTINGS_VERSION: u8 = 9;
 const QUBE_AUTO_LAYER_NONE: u8 = 0xff;
-const QUBE_MODE_KEY_TAP_MS: u32 = 220;
 const QUBE_TEXT_AXIS_IDLE_MS: u32 = 220;
 const QUBE_TEXT_THRESHOLD: i32 = 1;
 const QUBE_TOUCH_CLICK_MS: u64 = 40;
@@ -586,7 +681,7 @@ const QUBE_AXIS_FLAG_RIGHT_INVERT_SCROLL_X: u8 = 1 << 1;
 const QUBE_AXIS_FLAG_LEFT_INVERT_TEXT_X: u8 = 1 << 2;
 const QUBE_AXIS_FLAG_RIGHT_INVERT_TEXT_X: u8 = 1 << 3;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum QubePointingMode {
     Normal,
     Sniper,
@@ -764,9 +859,7 @@ impl QubePointingSettings {
 
 #[derive(Clone, Copy)]
 struct QubePointingSideState {
-    mode_override: Option<QubePointingMode>,
-    mode_key_prev_override: Option<QubePointingMode>,
-    mode_key_pressed_at_ms: u32,
+    mode_key: PointingModeKeyState<QubePointingMode>,
     remainder_x: i32,
     remainder_y: i32,
     text_last_motion_ms: u32,
@@ -775,9 +868,7 @@ struct QubePointingSideState {
 impl QubePointingSideState {
     const fn new() -> Self {
         Self {
-            mode_override: None,
-            mode_key_prev_override: None,
-            mode_key_pressed_at_ms: 0,
+            mode_key: PointingModeKeyState::new(),
             remainder_x: 0,
             remainder_y: 0,
             text_last_motion_ms: 0,
@@ -823,6 +914,11 @@ impl<'a> QubePointingModeProcessor<'a> {
 
     async fn on_peripheral_settings_event(&mut self, event: PeripheralSettingsEvent) {
         self.settings.apply_packet(&event.0);
+        for side in 0..self.sides.len() {
+            self.sides[side]
+                .mode_key
+                .set_sticky_enabled(self.settings.sticky_mode(side));
+        }
         if self.active_auto_layer != QUBE_AUTO_LAYER_NONE
             && !self.settings.auto_layer_enabled(self.mode_for_side(0))
             && !self.settings.auto_layer_enabled(self.mode_for_side(1))
@@ -868,8 +964,8 @@ impl<'a> QubePointingModeProcessor<'a> {
             return;
         };
 
-        #[cfg(all(feature = "split", feature = "_ble"))]
-        crate::split::ble::central::update_activity_time();
+        #[cfg(feature = "_ble")]
+        crate::ble::sleep::report_pointing_activity(&event);
 
         let mut x = 0i16;
         let mut y = 0i16;
@@ -994,7 +1090,10 @@ impl<'a> QubePointingModeProcessor<'a> {
     }
 
     fn mode_for_side(&self, side: usize) -> QubePointingMode {
-        self.sides[side].mode_override.unwrap_or(self.settings.mode[side])
+        self.sides[side]
+            .mode_key
+            .mode_override()
+            .unwrap_or(self.settings.mode[side])
     }
 
     fn handle_mode_key(&mut self, sides: [bool; 2], mode: QubePointingMode, pressed: bool) {
@@ -1002,23 +1101,10 @@ impl<'a> QubePointingModeProcessor<'a> {
             if !enabled {
                 continue;
             }
-            if pressed {
-                self.sides[side].mode_key_prev_override = self.sides[side].mode_override;
-                self.sides[side].mode_override = Some(mode);
-                self.sides[side].mode_key_pressed_at_ms = now_ms_u32();
-                self.sides[side].reset_accum();
-            } else {
-                let tapped = now_ms_u32().wrapping_sub(self.sides[side].mode_key_pressed_at_ms) <= QUBE_MODE_KEY_TAP_MS;
-                self.sides[side].mode_override = self.sides[side].mode_key_prev_override;
-                if self.settings.sticky_mode(side) && tapped {
-                    if self.sides[side].mode_override == Some(mode) {
-                        self.sides[side].mode_override = None;
-                    } else {
-                        self.sides[side].mode_override = Some(mode);
-                    }
-                }
-                self.sides[side].reset_accum();
-            }
+            self.sides[side]
+                .mode_key
+                .handle(mode, pressed, self.settings.sticky_mode(side));
+            self.sides[side].reset_accum();
         }
     }
 
@@ -1154,6 +1240,15 @@ fn accelerate_axis(value: i16) -> i16 {
     }
 }
 
+fn apply_runtime_transform(x: i16, y: i16, rotation: u8, acceleration: bool) -> (i16, i16) {
+    let (mut x, mut y) = rotate_motion(x, y, rotation);
+    if acceleration {
+        x = accelerate_axis(x);
+        y = accelerate_axis(y);
+    }
+    (x, y)
+}
+
 fn now_ms_u32() -> u32 {
     embassy_time::Instant::now().as_millis() as u32
 }
@@ -1179,7 +1274,7 @@ async fn send_mouse_report_unchecked(buttons: u8, x: i16, y: i16, wheel: i16, pa
 }
 
 /// PointingProcessor that converts motion events to mouse reports
-#[processor(subscribe = [PointingEvent, PointingProcessorEvent])]
+#[processor(subscribe = [PointingEvent, PointingProcessorEvent, PointingTransformEvent])]
 pub struct PointingProcessor<'a> {
     /// Reference to the keymap (used for mouse_buttons)
     keymap: &'a KeyMap<'a>,
@@ -1188,6 +1283,8 @@ pub struct PointingProcessor<'a> {
     accumulator: MotionAccumulator,
     /// current active mode
     current_mode: PointingMode,
+    runtime_rotation: u8,
+    runtime_acceleration: bool,
 }
 
 impl<'a> PointingProcessor<'a> {
@@ -1198,6 +1295,8 @@ impl<'a> PointingProcessor<'a> {
             config,
             accumulator: MotionAccumulator::default(),
             current_mode: PointingMode::default(),
+            runtime_rotation: 0,
+            runtime_acceleration: false,
         }
     }
 
@@ -1241,9 +1340,11 @@ impl<'a> PointingProcessor<'a> {
         if self.config.swap_xy {
             (x, y) = (y, x);
         }
+        (x, y) = apply_runtime_transform(x, y, self.runtime_rotation, self.runtime_acceleration);
 
         let buttons = self.keymap.mouse_buttons();
         match self.current_mode {
+            PointingMode::Disabled => {}
             PointingMode::Cursor(_) | PointingMode::Scroll(_) | PointingMode::Sniper(_) => {
                 // modes that generate mouse reports
                 let mouse_report = match self.current_mode {
@@ -1326,6 +1427,17 @@ impl<'a> PointingProcessor<'a> {
                 self.config.device_id, event.mode
             );
             self.set_pointing_mode(event.mode);
+        }
+    }
+
+    pub async fn on_pointing_transform_event(&mut self, event: PointingTransformEvent) {
+        if self.config.device_id == ALL_POINTING_DEVICES || self.config.device_id == event.device_id {
+            let rotation = event.rotation.min(3);
+            if self.runtime_rotation != rotation || self.runtime_acceleration != event.acceleration {
+                self.accumulator.reset();
+                self.runtime_rotation = rotation;
+                self.runtime_acceleration = event.acceleration;
+            }
         }
     }
 }
@@ -1426,11 +1538,7 @@ fn compute_caret_taps(
         MovementAxis::Y => accumulator.reset_x(),
     }
 
-    if count == 0 {
-        None
-    } else {
-        Some((keycode, count))
-    }
+    if count == 0 { None } else { Some((keycode, count)) }
 }
 
 #[cfg(test)]
@@ -1467,6 +1575,76 @@ mod tests {
         assert_eq!(qube_touch_gesture_buttons(0), 0);
         assert_eq!(qube_touch_gesture_buttons(3), 0);
         assert_eq!(qube_touch_gesture_buttons(-1), 0);
+    }
+
+    #[test]
+    fn pointing_mode_key_state_is_momentary_without_sticky_mode() {
+        let mut state = PointingModeKeyState::new();
+
+        state.handle(1u8, true, false);
+        assert_eq!(state.mode_override(), Some(1));
+
+        state.handle(1, false, false);
+        assert_eq!(state.mode_override(), None);
+    }
+
+    #[test]
+    fn pointing_mode_key_state_sticky_selection_switches_and_toggles_off() {
+        let mut state = PointingModeKeyState::new();
+
+        for mode in [1u8, 2, 3] {
+            state.handle(mode, true, true);
+            state.handle(mode, false, true);
+            assert_eq!(state.mode_override(), Some(mode));
+        }
+
+        state.handle(3, true, true);
+        state.handle(3, false, true);
+        assert_eq!(state.mode_override(), None);
+    }
+
+    #[test]
+    fn pointing_mode_key_state_clears_latch_when_sticky_mode_is_disabled() {
+        let mut state = PointingModeKeyState::new();
+        state.handle(1u8, true, true);
+        assert_eq!(state.mode_override(), Some(1));
+
+        state.set_sticky_enabled(false);
+        assert_eq!(state.mode_override(), None);
+    }
+
+    #[test]
+    fn qube_auto_layer_flags_cover_every_pointing_mode_independently() {
+        let mut settings = QubePointingSettings::new();
+        settings.auto_flags = 0b1111;
+
+        for mode in [
+            QubePointingMode::Normal,
+            QubePointingMode::Sniper,
+            QubePointingMode::Scroll,
+            QubePointingMode::Text,
+        ] {
+            assert!(settings.auto_layer_enabled(mode));
+        }
+
+        settings.auto_flags = 0b0001;
+        assert!(settings.auto_layer_enabled(QubePointingMode::Normal));
+        assert!(!settings.auto_layer_enabled(QubePointingMode::Sniper));
+        assert!(!settings.auto_layer_enabled(QubePointingMode::Scroll));
+        assert!(!settings.auto_layer_enabled(QubePointingMode::Text));
+    }
+
+    #[test]
+    fn runtime_pointing_transform_rotates_and_accelerates_motion() {
+        assert_eq!(apply_runtime_transform(12, -4, 0, false), (12, -4));
+        assert_eq!(apply_runtime_transform(12, -4, 1, false), (-4, -12));
+        assert_eq!(apply_runtime_transform(12, -4, 2, false), (-12, 4));
+        assert_eq!(apply_runtime_transform(12, -4, 3, false), (4, 12));
+        assert_eq!(apply_runtime_transform(12, -4, 0, true), (24, -4));
+        assert_eq!(
+            apply_runtime_transform(i16::MAX, i16::MIN, 0, true),
+            (i16::MAX, i16::MIN)
+        );
     }
 
     struct DummyDriver {
@@ -1549,6 +1727,9 @@ mod tests {
         }
 
         async fn wait_for_low(&mut self) -> Result<(), Self::Error> {
+            if !self.state.get() {
+                return Ok(());
+            }
             embassy_time::Timer::after(Duration::from_millis(500)).await;
             Ok(())
         }
@@ -1745,6 +1926,77 @@ mod tests {
         );
 
         assert!(device.sensor.read_called);
+    }
+
+    #[test]
+    fn test_due_report_is_not_starved_by_asserted_motion_pin() {
+        let motion_pin = DummyMotionPin::new();
+        motion_pin.set_low();
+
+        let driver = DummyDriver {
+            motion_pending: true,
+            motion: MotionData { dx: 7, dy: -4 },
+            init_called: true,
+            fails_init: false,
+            motion_gpio: Some(motion_pin),
+            read_called: false,
+        };
+
+        let mut device = PointingDevice {
+            sensor: driver,
+            init_state: InitState::Ready,
+            poll_interval: Duration::from_millis(1),
+            report_interval: Duration::from_millis(0),
+            last_poll: Instant::now(),
+            last_report: Instant::now(),
+            accumulated_x: 12,
+            accumulated_y: -8,
+            id: 1,
+        };
+
+        let event = block_on(device.read_event());
+
+        assert_eq!(event.axes[0].value, 12);
+        assert_eq!(event.axes[1].value, -8);
+        assert!(
+            !device.sensor.read_called,
+            "a due report must be emitted before another immediate MOTION poll"
+        );
+    }
+
+    #[test]
+    fn report_preserves_motion_that_does_not_fit_one_hid_frame() {
+        let driver = DummyDriver {
+            motion_pending: false,
+            motion: MotionData { dx: 0, dy: 0 },
+            init_called: true,
+            fails_init: false,
+            motion_gpio: None,
+            read_called: false,
+        };
+        let mut device = PointingDevice {
+            sensor: driver,
+            init_state: InitState::Ready,
+            poll_interval: Duration::from_millis(1),
+            report_interval: Duration::from_millis(8),
+            last_poll: Instant::MIN,
+            last_report: Instant::MIN,
+            accumulated_x: 300,
+            accumulated_y: -300,
+            id: 1,
+        };
+
+        let first = device.take_report_event().unwrap();
+        assert_eq!(first.axes[0].value, 127);
+        assert_eq!(first.axes[1].value, -128);
+        assert_eq!(device.accumulated_x, 173);
+        assert_eq!(device.accumulated_y, -172);
+
+        let second = device.take_report_event().unwrap();
+        assert_eq!(second.axes[0].value, 127);
+        assert_eq!(second.axes[1].value, -128);
+        assert_eq!(device.accumulated_x, 46);
+        assert_eq!(device.accumulated_y, -44);
     }
 
     // === MotionAccumulator tests ===
@@ -2076,7 +2328,7 @@ mod tests {
         // 3 calls of (20, 20): total grows (20,20)→(40,40)→(60,60)
         assert!(compute_caret_taps(20, 20, &mut a, &cfg()).is_none()); // 40
         assert!(compute_caret_taps(20, 20, &mut a, &cfg()).is_none()); // 80
-                                                                       // 3rd call: |60|+|60|=120 > 100 → tap
+        // 3rd call: |60|+|60|=120 > 100 → tap
         assert_eq!(compute_caret_taps(20, 20, &mut a, &cfg()), Some((HidKeyCode::Right, 1)));
     }
 
@@ -2185,6 +2437,7 @@ mod tests {
     fn test_pointing_processor_mode_selection() {
         // Test that the processor correctly selects the mode based on current layer
         let modes = [
+            PointingMode::Disabled,
             PointingMode::Cursor(CursorConfig::default()),
             PointingMode::Scroll(ScrollConfig::default()),
             PointingMode::Sniper(SniperConfig {

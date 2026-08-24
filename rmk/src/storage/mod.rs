@@ -1,7 +1,15 @@
+#[cfg(feature = "host")]
+use core::cell::RefCell;
 use core::fmt::Debug;
 
 use embassy_embedded_hal::adapter::BlockingAsync;
+#[cfg(feature = "host")]
+use embassy_futures::select::{Either5, select5};
+#[cfg(feature = "host")]
+use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::signal::Signal;
+#[cfg(feature = "host")]
+use embassy_time::{Duration, Instant, Timer};
 use embedded_storage::nor_flash::NorFlash;
 use embedded_storage_async::nor_flash::NorFlash as AsyncNorFlash;
 use postcard::experimental::max_size::MaxSize;
@@ -21,6 +29,8 @@ use {
 #[cfg(feature = "_ble")]
 use crate::ble::profile::ProfileInfo;
 use crate::channel::FLASH_CHANNEL;
+#[cfg(feature = "host")]
+use crate::channel::MACRO_FLASH_SIGNAL;
 use crate::config::StorageConfig;
 #[cfg(all(feature = "_ble", feature = "split"))]
 use crate::split::ble::PeerAddress;
@@ -28,6 +38,118 @@ use crate::{BUILD_HASH, config};
 
 #[cfg(feature = "host")]
 const KEYMAP_STORAGE_SCHEMA_VERSION: u16 = 2;
+/// Quiet period before persisting the latest complete macro snapshot. This is
+/// longer than Entropy's 2.5 s BLE reply timeout, so consecutive wireless
+/// editor saves collapse into one flash write without changing radio timing.
+#[cfg(feature = "host")]
+const MACRO_FLASH_SETTLE_TIMEOUT: Duration = Duration::from_secs(3);
+/// Quiet period before draining keymap mutations to flash. Host replies are
+/// sent as soon as the live keymap is updated; persistence happens here and
+/// can no longer back-pressure the serial Vial service.
+#[cfg(feature = "host")]
+const KEYMAP_FLASH_SETTLE_TIMEOUT: Duration = Duration::from_millis(500);
+
+#[cfg(feature = "host")]
+struct PendingKeymapWrites<const N: usize> {
+    actions: [Option<KeyAction>; N],
+}
+
+#[cfg(feature = "host")]
+impl<const N: usize> PendingKeymapWrites<N> {
+    const fn new() -> Self {
+        Self { actions: [None; N] }
+    }
+
+    fn insert(&mut self, index: usize, action: KeyAction) -> bool {
+        let Some(slot) = self.actions.get_mut(index) else {
+            return false;
+        };
+        *slot = Some(action);
+        true
+    }
+
+    fn take_next(&mut self) -> Option<(usize, KeyAction)> {
+        self.actions
+            .iter_mut()
+            .enumerate()
+            .find_map(|(index, action)| action.take().map(|action| (index, action)))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.actions.iter().all(Option::is_none)
+    }
+
+    fn clear(&mut self) {
+        self.actions.fill(None);
+    }
+}
+
+#[cfg(feature = "host")]
+static KEYMAP_FLASH_PENDING: Mutex<
+    crate::RawMutex,
+    RefCell<PendingKeymapWrites<{ crate::KEYMAP_STORAGE_ENTRY_COUNT }>>,
+> = Mutex::new(RefCell::new(PendingKeymapWrites::new()));
+
+#[cfg(feature = "host")]
+static KEYMAP_FLASH_SIGNAL: Signal<crate::RawMutex, ()> = Signal::new();
+
+#[cfg(feature = "host")]
+fn keymap_flat_index(layer: u8, row: u8, col: u8) -> Option<usize> {
+    let (layer, row, col) = (layer as usize, row as usize, col as usize);
+    (layer < crate::KEYMAP_LAYERS && row < crate::KEYMAP_ROWS && col < crate::KEYMAP_COLS)
+        .then_some(layer * crate::KEYMAP_ROWS * crate::KEYMAP_COLS + row * crate::KEYMAP_COLS + col)
+}
+
+#[cfg(feature = "host")]
+fn keymap_position_from_flat(index: usize) -> (u8, u8, u8) {
+    let layer_size = crate::KEYMAP_ROWS * crate::KEYMAP_COLS;
+    let layer = index / layer_size;
+    let layer_offset = index % layer_size;
+    let row = layer_offset / crate::KEYMAP_COLS;
+    let col = layer_offset - row * crate::KEYMAP_COLS;
+    (layer as u8, row as u8, col as u8)
+}
+
+/// Stage the latest action for one key without waiting for flash capacity.
+/// Different positions are retained independently; repeated writes to the
+/// same position collapse to the latest action.
+#[cfg(feature = "host")]
+pub(crate) fn queue_keymap_flash_write(layer: u8, row: u8, col: u8, action: KeyAction) -> bool {
+    let Some(index) = keymap_flat_index(layer, row, col) else {
+        error!("Invalid keymap flash position: layer {} ({},{})", layer, row, col);
+        return false;
+    };
+    let queued = KEYMAP_FLASH_PENDING.lock(|pending| pending.borrow_mut().insert(index, action));
+    if queued {
+        KEYMAP_FLASH_SIGNAL.signal(());
+    }
+    queued
+}
+
+#[cfg(feature = "host")]
+fn take_pending_keymap_flash_write() -> Option<FlashOperationMessage> {
+    KEYMAP_FLASH_PENDING.lock(|pending| {
+        let (index, action) = pending.borrow_mut().take_next()?;
+        let (layer, row, col) = keymap_position_from_flat(index);
+        Some(FlashOperationMessage::KeymapKey {
+            layer,
+            row,
+            col,
+            action,
+        })
+    })
+}
+
+#[cfg(feature = "host")]
+fn keymap_flash_writes_pending() -> bool {
+    KEYMAP_FLASH_PENDING.lock(|pending| !pending.borrow().is_empty())
+}
+
+#[cfg(feature = "host")]
+fn clear_pending_keymap_flash_writes() {
+    KEYMAP_FLASH_SIGNAL.reset();
+    KEYMAP_FLASH_PENDING.lock(|pending| pending.borrow_mut().clear());
+}
 
 /// Signal to synchronize the flash operation status, usually used outside of the flash task.
 /// True if the flash operation is finished correctly, false if the flash operation is finished with error.
@@ -89,7 +211,6 @@ pub(crate) async fn write_peer_address(addr: PeerAddress) -> bool {
 }
 
 // Message send from other tasks, which will do saving or clearing operation
-#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub(crate) enum FlashOperationMessage {
@@ -113,8 +234,6 @@ pub(crate) enum FlashOperationMessage {
     LayoutOptions(u32),
     // Default layer number
     DefaultLayer(u8),
-    #[cfg(feature = "host")]
-    MacroData([u8; MACRO_SPACE_SIZE]),
     #[cfg(feature = "host")]
     KeymapKey {
         layer: u8,
@@ -223,6 +342,19 @@ pub(crate) enum StorageKey {
     },
     #[cfg(feature = "host")]
     EncoderV2 {
+        layer: u8,
+        idx: u8,
+    },
+    // Optional tail namespace: profiles can replace legacy default actions
+    // above a layer boundary while preserving stored lower-layer actions.
+    #[cfg(feature = "host")]
+    KeymapTailV3 {
+        layer: u8,
+        row: u8,
+        col: u8,
+    },
+    #[cfg(feature = "host")]
+    EncoderTailV3 {
         layer: u8,
         idx: u8,
     },
@@ -404,6 +536,7 @@ pub struct Storage<
 > {
     pub(crate) flash: MapStorage<StorageKey, F, NoCache>,
     pub(crate) buffer: [u8; get_buffer_size()],
+    no_action_layer_start: Option<u8>,
 }
 
 /// Read out storage config, update and then save back.
@@ -423,6 +556,34 @@ macro_rules! update_storage_field {
 impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_ENCODER: usize>
     Storage<F, ROW, COL, NUM_LAYER, NUM_ENCODER>
 {
+    #[cfg(feature = "host")]
+    pub(crate) fn uses_tail_key_namespace(&self, layer: u8) -> bool {
+        self.no_action_layer_start.is_some_and(|start| layer >= start)
+    }
+
+    #[cfg(feature = "host")]
+    pub(crate) fn tail_key_namespace_start(&self) -> Option<u8> {
+        self.no_action_layer_start
+    }
+
+    #[cfg(feature = "host")]
+    fn keymap_storage_key(&self, layer: u8, row: u8, col: u8) -> StorageKey {
+        if self.uses_tail_key_namespace(layer) {
+            StorageKey::KeymapTailV3 { layer, row, col }
+        } else {
+            StorageKey::KeymapV2 { layer, row, col }
+        }
+    }
+
+    #[cfg(feature = "host")]
+    fn encoder_storage_key(&self, idx: u8, layer: u8) -> StorageKey {
+        if self.uses_tail_key_namespace(layer) {
+            StorageKey::EncoderTailV3 { layer, idx }
+        } else {
+            StorageKey::EncoderV2 { layer, idx }
+        }
+    }
+
     async fn fetch_data(&mut self, key: StorageKey) -> Option<StorageData> {
         match self.flash.fetch_item(&mut self.buffer, &key).await {
             Ok(data) => data,
@@ -487,6 +648,9 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
         let mut storage = Self {
             flash: MapStorage::new(flash, MapConfig::new(storage_range), NoCache::new()),
             buffer: [0; get_buffer_size()],
+            no_action_layer_start: storage_config
+                .no_action_layer_start
+                .filter(|start| usize::from(*start) < NUM_LAYER),
         };
 
         // Check whether keymap and configs have been storaged in flash
@@ -597,12 +761,10 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
         for (layer, layer_data) in keymap.iter().enumerate() {
             for (row, row_data) in layer_data.iter().enumerate() {
                 for (col, action) in row_data.iter().enumerate() {
-                    self.store_data(
-                        StorageKey::keymap(layer as u8, row as u8, col as u8),
-                        &StorageData::KeyAction(*action),
-                    )
-                    .await
-                    .map_err(|e| print_storage_error::<F>(e))?;
+                    let key = self.keymap_storage_key(layer as u8, row as u8, col as u8);
+                    self.store_data(key, &StorageData::KeyAction(*action))
+                        .await
+                        .map_err(|e| print_storage_error::<F>(e))?;
                 }
             }
         }
@@ -612,12 +774,10 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
         if let Some(encoder_map) = encoder_map {
             for (layer, layer_data) in encoder_map.iter().enumerate() {
                 for (idx, action) in layer_data.iter().enumerate() {
-                    self.store_data(
-                        StorageKey::encoder(idx as u8, layer as u8),
-                        &StorageData::EncoderAction(*action),
-                    )
-                    .await
-                    .map_err(|e| print_storage_error::<F>(e))?;
+                    let key = self.encoder_storage_key(idx as u8, layer as u8);
+                    self.store_data(key, &StorageData::EncoderAction(*action))
+                        .await
+                        .map_err(|e| print_storage_error::<F>(e))?;
                 }
             }
         }
@@ -664,11 +824,8 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
         for (layer, layer_data) in keymap.iter().enumerate() {
             for (row, row_data) in layer_data.iter().enumerate() {
                 for (col, action) in row_data.iter().enumerate() {
-                    self.store_data(
-                        StorageKey::keymap(layer as u8, row as u8, col as u8),
-                        &StorageData::KeyAction(*action),
-                    )
-                    .await?;
+                    let key = self.keymap_storage_key(layer as u8, row as u8, col as u8);
+                    self.store_data(key, &StorageData::KeyAction(*action)).await?;
                 }
             }
         }
@@ -677,11 +834,8 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
         if let Some(encoder_map) = encoder_map {
             for (layer, layer_data) in encoder_map.iter().enumerate() {
                 for (idx, action) in layer_data.iter().enumerate() {
-                    self.store_data(
-                        StorageKey::encoder(idx as u8, layer as u8),
-                        &StorageData::EncoderAction(*action),
-                    )
-                    .await?;
+                    let key = self.encoder_storage_key(idx as u8, layer as u8);
+                    self.store_data(key, &StorageData::EncoderAction(*action)).await?;
                 }
             }
         }
@@ -761,8 +915,59 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
     crate::core_traits::Runnable for Storage<F, ROW, COL, NUM_LAYER, NUM_ENCODER>
 {
     async fn run(&mut self) -> ! {
+        #[cfg(feature = "host")]
+        let mut pending_macro: Option<[u8; MACRO_SPACE_SIZE]> = None;
+        #[cfg(feature = "host")]
+        let mut macro_deadline = Instant::now();
+        #[cfg(feature = "host")]
+        let mut keymap_deadline: Option<Instant> = None;
+
         loop {
-            let info: FlashOperationMessage = FLASH_CHANNEL.receive().await;
+            #[cfg(feature = "host")]
+            let info = match select5(
+                FLASH_CHANNEL.receive(),
+                MACRO_FLASH_SIGNAL.wait(),
+                KEYMAP_FLASH_SIGNAL.wait(),
+                Timer::at(if pending_macro.is_some() {
+                    macro_deadline
+                } else {
+                    Instant::MAX
+                }),
+                Timer::at(keymap_deadline.unwrap_or(Instant::MAX)),
+            )
+            .await
+            {
+                Either5::First(info) => Some(info),
+                Either5::Second(data) => {
+                    pending_macro = Some(data);
+                    macro_deadline = Instant::now() + MACRO_FLASH_SETTLE_TIMEOUT;
+                    None
+                }
+                Either5::Third(()) => {
+                    keymap_deadline = Some(Instant::now() + KEYMAP_FLASH_SETTLE_TIMEOUT);
+                    None
+                }
+                Either5::Fourth(()) => {
+                    let data = pending_macro.take().expect("pending macro snapshot");
+                    let result = self
+                        .store_data(StorageKey::MacroData, &StorageData::MacroData(data))
+                        .await;
+                    report_storage_result::<F>(result);
+                    None
+                }
+                Either5::Fifth(()) => {
+                    let info = take_pending_keymap_flash_write();
+                    keymap_deadline = keymap_flash_writes_pending().then(Instant::now);
+                    info
+                }
+            };
+
+            #[cfg(not(feature = "host"))]
+            let info = Some(FLASH_CHANNEL.receive().await);
+
+            let Some(info) = info else {
+                continue;
+            };
             debug!("Flash operation: {:?}", info);
 
             let write_result: Result<(), SSError<F::Error>> = match info {
@@ -814,18 +1019,27 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
                 FlashOperationMessage::LayoutOptions(layout_option) => {
                     update_storage_field!(&mut self.flash, &mut self.buffer, LayoutConfig, layout_option)
                 }
-                FlashOperationMessage::Reset => self.flash.erase_all().await,
+                FlashOperationMessage::Reset => {
+                    #[cfg(feature = "host")]
+                    {
+                        pending_macro = None;
+                        MACRO_FLASH_SIGNAL.reset();
+                        keymap_deadline = None;
+                        clear_pending_keymap_flash_writes();
+                    }
+                    self.flash.erase_all().await
+                }
                 FlashOperationMessage::ResetLayout => {
+                    #[cfg(feature = "host")]
+                    {
+                        keymap_deadline = None;
+                        clear_pending_keymap_flash_writes();
+                    }
                     info!("Ignoring ResetLayout at runtime (handled at startup via clear_layout).");
                     Ok(())
                 }
                 FlashOperationMessage::DefaultLayer(default_layer) => {
                     update_storage_field!(&mut self.flash, &mut self.buffer, LayoutConfig, default_layer)
-                }
-                #[cfg(feature = "host")]
-                FlashOperationMessage::MacroData(data) => {
-                    self.store_data(StorageKey::MacroData, &StorageData::MacroData(data))
-                        .await
                 }
                 #[cfg(feature = "host")]
                 FlashOperationMessage::KeymapKey {
@@ -834,13 +1048,13 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
                     col,
                     action,
                 } => {
-                    self.store_data(StorageKey::keymap(layer, row, col), &StorageData::KeyAction(action))
-                        .await
+                    let key = self.keymap_storage_key(layer, row, col);
+                    self.store_data(key, &StorageData::KeyAction(action)).await
                 }
                 #[cfg(feature = "host")]
                 FlashOperationMessage::Encoder { layer, idx, action } => {
-                    self.store_data(StorageKey::encoder(idx, layer), &StorageData::EncoderAction(action))
-                        .await
+                    let key = self.encoder_storage_key(idx, layer);
+                    self.store_data(key, &StorageData::EncoderAction(action)).await
                 }
                 #[cfg(feature = "host")]
                 FlashOperationMessage::Combo { idx, config } => {
@@ -925,13 +1139,17 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
                 }
             };
 
-            match write_result {
-                Ok(()) => FLASH_OPERATION_FINISHED.signal(true),
-                Err(e) => {
-                    print_storage_error::<F>(e);
-                    FLASH_OPERATION_FINISHED.signal(false);
-                }
-            }
+            report_storage_result::<F>(write_result);
+        }
+    }
+}
+
+fn report_storage_result<F: AsyncNorFlash>(result: Result<(), SSError<F::Error>>) {
+    match result {
+        Ok(()) => FLASH_OPERATION_FINISHED.signal(true),
+        Err(e) => {
+            print_storage_error::<F>(e);
+            FLASH_OPERATION_FINISHED.signal(false);
         }
     }
 }
@@ -1112,6 +1330,14 @@ mod tests {
             },
             #[cfg(feature = "host")]
             StorageKey::EncoderV2 { layer: 12, idx: 13 },
+            #[cfg(feature = "host")]
+            StorageKey::KeymapTailV3 {
+                layer: 14,
+                row: 15,
+                col: 16,
+            },
+            #[cfg(feature = "host")]
+            StorageKey::EncoderTailV3 { layer: 17, idx: 18 },
         ];
 
         let mut buffer = [0u8; 64];
@@ -1121,6 +1347,35 @@ mod tests {
             assert_eq!(decoded, key);
             assert_eq!(used, size);
         }
+    }
+
+    #[cfg(feature = "host")]
+    #[test]
+    fn pending_keymap_writes_keep_distinct_positions_and_latest_value() {
+        let mut pending = PendingKeymapWrites::<4>::new();
+
+        assert!(pending.insert(1, KeyAction::No));
+        assert!(pending.insert(3, KeyAction::Transparent));
+        assert!(pending.insert(1, KeyAction::Transparent));
+
+        assert_eq!(pending.take_next(), Some((1, KeyAction::Transparent)));
+        assert_eq!(pending.take_next(), Some((3, KeyAction::Transparent)));
+        assert!(pending.take_next().is_none());
+        assert!(pending.is_empty());
+
+        assert!(pending.insert(0, KeyAction::No));
+        pending.clear();
+        assert!(pending.is_empty());
+    }
+
+    #[cfg(feature = "host")]
+    #[test]
+    fn pending_keymap_write_rejects_only_out_of_range_index() {
+        let mut pending = PendingKeymapWrites::<2>::new();
+
+        assert!(pending.insert(0, KeyAction::No));
+        assert!(pending.insert(1, KeyAction::No));
+        assert!(!pending.insert(2, KeyAction::No));
     }
 
     #[test]
@@ -1372,6 +1627,138 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(updated_runtime_data.keymap[0][0][0], legacy);
+        });
+    }
+
+    #[cfg(feature = "host")]
+    #[test]
+    fn tail_namespace_preserves_lower_layers_and_replaces_legacy_tail() {
+        block_on(async {
+            use rmk_types::action::{Action, EncoderAction, KeyAction};
+            use rmk_types::keycode::{HidKeyCode, KeyCode};
+
+            type Flash = TestFlash<16_384, 4_096, 1>;
+
+            let key = |keycode| KeyAction::Single(Action::Key(KeyCode::Hid(keycode)));
+            let lower_key = key(HidKeyCode::A);
+            let legacy_tail_key = key(HidKeyCode::B);
+            let new_tail_key = key(HidKeyCode::C);
+            let lower_encoder = EncoderAction::new(key(HidKeyCode::D), key(HidKeyCode::E));
+            let legacy_tail_encoder = EncoderAction::new(key(HidKeyCode::F), key(HidKeyCode::G));
+            let new_tail_encoder = EncoderAction::new(key(HidKeyCode::H), key(HidKeyCode::I));
+
+            let storage_range = (16_384 - 2 * 4_096) as u32..16_384u32;
+            let mut map =
+                MapStorage::<StorageKey, _, _>::new(Flash::new(), MapConfig::new(storage_range), NoCache::new());
+            let mut buffer = [0u8; 256];
+
+            map.store_item(
+                &mut buffer,
+                &StorageKey::StorageConfig,
+                &StorageData::StorageConfig(LocalStorageConfig {
+                    enable: true,
+                    build_hash: BUILD_HASH,
+                }),
+            )
+            .await
+            .unwrap();
+            map.store_item(
+                &mut buffer,
+                &StorageKey::KeymapSchemaVersion,
+                &StorageData::KeymapSchemaVersion(KEYMAP_STORAGE_SCHEMA_VERSION),
+            )
+            .await
+            .unwrap();
+            map.store_item(
+                &mut buffer,
+                &StorageKey::KeymapV2 {
+                    layer: 4,
+                    row: 0,
+                    col: 0,
+                },
+                &StorageData::KeyAction(lower_key),
+            )
+            .await
+            .unwrap();
+            map.store_item(
+                &mut buffer,
+                &StorageKey::KeymapV2 {
+                    layer: 5,
+                    row: 0,
+                    col: 0,
+                },
+                &StorageData::KeyAction(legacy_tail_key),
+            )
+            .await
+            .unwrap();
+            map.store_item(
+                &mut buffer,
+                &StorageKey::EncoderV2 { layer: 4, idx: 0 },
+                &StorageData::EncoderAction(lower_encoder),
+            )
+            .await
+            .unwrap();
+            map.store_item(
+                &mut buffer,
+                &StorageKey::EncoderV2 { layer: 5, idx: 0 },
+                &StorageData::EncoderAction(legacy_tail_encoder),
+            )
+            .await
+            .unwrap();
+
+            let (flash, _) = map.destroy();
+            let factory_keymap = [[[KeyAction::No; 1]; 1]; 6];
+            let factory_encoder_map = [[EncoderAction::default(); 1]; 6];
+            let encoder_map: Option<&mut [[EncoderAction; 1]; 6]> = None;
+            let storage_config = RuntimeStorageConfig {
+                no_action_layer_start: Some(5),
+                ..RuntimeStorageConfig::default()
+            };
+            let mut storage = Storage::<Flash, 1, 1, 6, 1>::new(
+                flash,
+                &factory_keymap,
+                &encoder_map,
+                &storage_config,
+                &RuntimeBehaviorConfig::default(),
+            )
+            .await;
+
+            let mut runtime_data = crate::keymap::KeymapData::new_with_encoder(factory_keymap, factory_encoder_map);
+            let mut runtime_behavior = RuntimeBehaviorConfig::default();
+            storage
+                .read_runtime_state(&mut runtime_data, &mut runtime_behavior)
+                .await
+                .unwrap();
+
+            assert_eq!(runtime_data.keymap[4][0][0], lower_key);
+            assert_eq!(runtime_data.keymap[5][0][0], KeyAction::No);
+            assert_eq!(runtime_data.encoder_map[4][0], lower_encoder);
+            assert_eq!(runtime_data.encoder_map[5][0], EncoderAction::default());
+
+            let tail_key = storage.keymap_storage_key(5, 0, 0);
+            let tail_encoder_key = storage.encoder_storage_key(0, 5);
+            assert!(matches!(tail_key, StorageKey::KeymapTailV3 { .. }));
+            assert!(matches!(tail_encoder_key, StorageKey::EncoderTailV3 { .. }));
+            storage
+                .store_data(tail_key, &StorageData::KeyAction(new_tail_key))
+                .await
+                .unwrap();
+            storage
+                .store_data(tail_encoder_key, &StorageData::EncoderAction(new_tail_encoder))
+                .await
+                .unwrap();
+
+            let mut updated_runtime_data =
+                crate::keymap::KeymapData::new_with_encoder(factory_keymap, factory_encoder_map);
+            storage
+                .read_runtime_state(&mut updated_runtime_data, &mut runtime_behavior)
+                .await
+                .unwrap();
+
+            assert_eq!(updated_runtime_data.keymap[4][0][0], lower_key);
+            assert_eq!(updated_runtime_data.keymap[5][0][0], new_tail_key);
+            assert_eq!(updated_runtime_data.encoder_map[4][0], lower_encoder);
+            assert_eq!(updated_runtime_data.encoder_map[5][0], new_tail_encoder);
         });
     }
 }

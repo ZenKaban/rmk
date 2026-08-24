@@ -17,6 +17,7 @@ unlock_keys = [[1, 4], [1, 3]]
 rows = 10
 cols = 6
 layers = 16
+no_action_layer_start = 5
 # matrix_map: maps physical (row,col) positions to logical matrix positions
 # Left half rows 0-4, right half rows 5-9.
 matrix_map = """
@@ -48,7 +49,7 @@ F1            F2              F3    F4    F5     F6      F7  F8   F9   F10  F11 
 MediaPrevTrack MediaNextTrack Home  Up    End    Insert  _   Kc7  Kc8  Kc9  _    CapsLock
 AudioMute     MediaPlayPause  Left  Down  Right  Enter   _   Kc4  Kc5  Kc6  _    CapsWordToggle
 AudioVolDown  AudioVolUp      _     _     _      Delete  _   _    PrintScreen Kc1 Kc2 Kc3 _ _
-PageUp        PageDown        _     _     _      _       MO(3) _    Kc0  _
+PageDown      PageUp          _     _     _      _       MO(3) _    Kc0  _
 """
 encoders = [["AudioVolUp","AudioVolDown"],["AudioVolUp","AudioVolDown"]]
 
@@ -100,6 +101,8 @@ peripheral_battery.pubs = 2
 peripheral_battery.subs = 4
 # One settings update publishes base, BT profile, and encoder packets together.
 peripheral_settings.channel_size = 3
+# ModuleSettingsBroadcast answers the re-sync request raised on peripheral link-up.
+peripheral_settings_refresh.subs = 1
 layer_change.channel_size = 4
 layer_change.subs = 6
 modifier.channel_size = 8
@@ -129,7 +132,7 @@ col_pins = ["P1_06", "P1_04", "P1_02", "P1_00", "P0_22", "P0_20"]
 pin_a = "P0_10"
 pin_b = "P0_09"
 phase = "resolution"
-resolution = 2
+resolution = 4
 internal_pullup = true
 
 [[split.peripheral]]
@@ -152,7 +155,7 @@ col_pins = ["P1_06", "P1_04", "P1_02", "P1_00", "P0_22", "P0_20"]
 pin_a = "P0_10"
 pin_b = "P0_09"
 phase = "resolution"
-resolution = 2
+resolution = 4
 internal_pullup = true
 
 [rmk]

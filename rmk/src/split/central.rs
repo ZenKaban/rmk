@@ -46,8 +46,9 @@ pub async fn run_peripheral_manager<
 {
     #[cfg(feature = "_ble")]
     {
-        use crate::split::ble::central::run_ble_peripheral_manager;
-        run_ble_peripheral_manager::<C, ROW, COL, ROW_OFFSET, COL_OFFSET>(id, addr, stack).await;
+        use crate::split::ble::central::{SplitLinkProfile, run_ble_peripheral_manager};
+        run_ble_peripheral_manager::<C, ROW, COL, ROW_OFFSET, COL_OFFSET>(id, addr, stack, SplitLinkProfile::Keyboard)
+            .await;
     };
 
     #[cfg(not(feature = "_ble"))]
@@ -61,4 +62,34 @@ pub async fn run_peripheral_manager<
         )
         .await;
     }
+}
+
+/// Run a BLE split peripheral manager with a connection profile selected from
+/// the complete keyboard configuration. Macro-generated keyboards use this
+/// entry point; the legacy [`run_peripheral_manager`] API keeps its standard
+/// keyboard profile for hand-written integrations.
+#[cfg(feature = "_ble")]
+pub async fn run_peripheral_manager_with_profile<
+    'b,
+    's,
+    const ROW: usize,
+    const COL: usize,
+    const ROW_OFFSET: usize,
+    const COL_OFFSET: usize,
+    C: Controller
+        + ControllerCmdSync<LeSetScanParams>
+        + ControllerCmdAsync<LeSetPhy>
+        + ControllerCmdSync<LeReadLocalSupportedFeatures>,
+>(
+    id: usize,
+    addr: &RefCell<VecView<Option<[u8; 6]>>>,
+    stack: &'b Stack<'s, C, DefaultPacketPool>,
+    profile: crate::split::ble::central::SplitLinkProfile,
+) where
+    's: 'b,
+{
+    crate::split::ble::central::run_ble_peripheral_manager::<C, ROW, COL, ROW_OFFSET, COL_OFFSET>(
+        id, addr, stack, profile,
+    )
+    .await;
 }

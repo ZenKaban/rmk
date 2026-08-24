@@ -129,12 +129,27 @@ impl KeyboardTomlConfig {
         if let Some(keymap) = &mut layout.keymap {
             final_layers.append(keymap);
         }
+        let no_action_layer_start = layout.no_action_layer_start.unwrap_or(layout.layers);
+        if no_action_layer_start > layout.layers {
+            return Err(format!(
+                "keyboard.toml: layout.no_action_layer_start ({}) cannot exceed layout.layers ({})",
+                no_action_layer_start, layout.layers
+            ));
+        }
         // The required number of layers is less than what's set in keymap
         // Fill the rest with empty keys
         if final_layers.len() <= layout.layers as usize {
-            for _ in final_layers.len()..layout.layers as usize {
+            for layer in final_layers.len()..layout.layers as usize {
+                let empty_action = if layer >= no_action_layer_start as usize {
+                    "No"
+                } else {
+                    "_"
+                };
                 // Add 2D vector of empty keys
-                final_layers.push(vec![vec!["_".to_string(); layout.cols as usize]; layout.rows as usize]);
+                final_layers.push(vec![
+                    vec![empty_action.to_string(); layout.cols as usize];
+                    layout.rows as usize
+                ]);
             }
         } else {
             return Err(format!(
@@ -412,6 +427,72 @@ impl KeyboardTomlConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse_layout(toml: &str) -> Result<LayoutConfig, String> {
+        let config: KeyboardTomlConfig = toml::from_str(toml).expect("Failed to parse keyboard config");
+        config.get_layout_config().map(|(layout, _)| layout)
+    }
+
+    #[test]
+    fn missing_layers_are_transparent_by_default() {
+        let layout = parse_layout(
+            r#"
+[layout]
+rows = 1
+cols = 2
+layers = 3
+matrix_map = "(0,0) (0,1)"
+
+[[layer]]
+keys = "A B"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(layout.keymap[0][0], ["A", "B"]);
+        assert!(layout.keymap[1..].iter().flatten().flatten().all(|key| key == "_"));
+    }
+
+    #[test]
+    fn missing_tail_layers_can_default_to_no_action() {
+        let layout = parse_layout(
+            r#"
+[layout]
+rows = 1
+cols = 2
+layers = 7
+no_action_layer_start = 5
+matrix_map = "(0,0) (0,1)"
+
+[[layer]]
+keys = "A B"
+"#,
+        )
+        .unwrap();
+
+        assert!(layout.keymap[1..5].iter().flatten().flatten().all(|key| key == "_"));
+        assert!(layout.keymap[5..].iter().flatten().flatten().all(|key| key == "No"));
+    }
+
+    #[test]
+    fn no_action_layer_start_must_fit_layout() {
+        let error = parse_layout(
+            r#"
+[layout]
+rows = 1
+cols = 1
+layers = 4
+no_action_layer_start = 5
+matrix_map = "(0,0)"
+
+[[layer]]
+keys = "A"
+"#,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("no_action_layer_start"));
+    }
 
     #[test]
     fn test_no_action_parsing() {

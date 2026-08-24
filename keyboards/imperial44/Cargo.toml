@@ -18,6 +18,8 @@ rmk = { path = "../../rmk", default-features = false, features = [
     "usb_log",
     "storage",
     "vial",
+    "vial_lock",
+    "universal_symbols",
     "nrf52840_ble",
     "split",
     "async_matrix",

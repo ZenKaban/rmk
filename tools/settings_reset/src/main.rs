@@ -1,7 +1,7 @@
 //! Ergohaven Settings Reset — bare metal, no Embassy
 //!
-//! Erases the RMK default settings flash range using raw NVMC registers.
-//! Then resets into the Adafruit bootloader.
+//! Erases the unified Ergohaven RMK settings flash range using raw NVMC
+//! registers. Then resets into the Adafruit bootloader.
 
 #![no_std]
 #![no_main]
@@ -24,9 +24,8 @@ const ADAFRUIT_DFU_MAGIC: u32 = 0x57;
 const NVMC_CONFIG_REN: u32 = 0; // Read-only
 const NVMC_CONFIG_EEN: u32 = 2; // Erase enable
 
-/// Flash layout
-const ERASE_START: u32 = 0x60000; // RMK storage default for nRF52 BLE
-const ERASE_END: u32 = 0x62000; // RMK default storage uses 2 flash pages
+/// All production profiles reserve the K:04-compatible 128 KiB partition.
+const STORAGE_RANGE: (u32, u32) = (0xCC000, 0xEC000);
 const PAGE_SIZE: u32 = 4096;
 const WORD_SIZE: u32 = 4;
 const ERASED_WORD: u32 = 0xFFFF_FFFF;
@@ -111,8 +110,9 @@ fn bootloader_reset() -> ! {
 fn main() -> ! {
     cortex_m::interrupt::disable();
 
-    let mut addr = ERASE_START;
-    while addr < ERASE_END {
+    let (start, end) = STORAGE_RANGE;
+    let mut addr = start;
+    while addr < end {
         erase_page_checked(addr);
         addr += PAGE_SIZE;
     }

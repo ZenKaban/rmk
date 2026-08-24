@@ -8,7 +8,7 @@ use rmk::event::{
 use rmk::macros::processor;
 use rmk::types::battery::BatteryStatus;
 use rmk::types::ble::BleState;
-use rmk::types::connection::ConnectionStatus;
+use rmk::types::connection::{ConnectionStatus, ConnectionType};
 
 use crate::module_settings::{self, Rgb};
 
@@ -212,7 +212,7 @@ impl LayerLed {
             BleState::Connected => {
                 self.start_overlay(Overlay::HostConnected, indicator_duration());
             }
-            BleState::Advertising | BleState::Inactive => {
+            BleState::Advertising | BleState::Inactive | BleState::Sleeping => {
                 if previous == Some(BleState::Connected) {
                     self.overlay = None;
                 }
@@ -307,18 +307,27 @@ impl LayerLed {
             }
         }
 
-        if self.ble_state == BleState::Inactive {
-            return color_off();
-        }
+        // USB_OUT is an explicit host-transport choice. BLE may keep
+        // advertising in the background, but its pairing/reconnect state is
+        // irrelevant while USB output is selected and must not replace the
+        // active-layer indicator.
+        let show_host_ble_status = self
+            .connection_status
+            .is_none_or(|status| status.preferred == ConnectionType::Ble);
+        if show_host_ble_status {
+            if matches!(self.ble_state, BleState::Inactive | BleState::Sleeping) {
+                return color_off();
+            }
 
-        if self.ble_state == BleState::Advertising {
-            let elapsed_ms = now.duration_since(self.indicator_phase_started).as_millis();
-            return match self.ble_advertising_mode {
-                BleAdvertisingMode::Pairing => pairing_blink_color(elapsed_ms),
-                BleAdvertisingMode::Reconnecting => {
-                    blink_color(color_white(), elapsed_ms, STATUS_BLINK_PERIOD_MS, STATUS_BLINK_ON_MS)
-                }
-            };
+            if self.ble_state == BleState::Advertising {
+                let elapsed_ms = now.duration_since(self.indicator_phase_started).as_millis();
+                return match self.ble_advertising_mode {
+                    BleAdvertisingMode::Pairing => pairing_blink_color(elapsed_ms),
+                    BleAdvertisingMode::Reconnecting => {
+                        blink_color(color_white(), elapsed_ms, STATUS_BLINK_PERIOD_MS, STATUS_BLINK_ON_MS)
+                    }
+                };
+            }
         }
 
         self.overlay

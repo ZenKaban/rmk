@@ -469,7 +469,12 @@ fn expand_forks(
                     panic!("\n❌ keyboard.toml: fork configuration missing match conditions! Please check the documentation: https://rmk.rs/docs/features/configuration/behavior.html#fork");
                 }
 
-                quote! { ::rmk::types::fork::Fork::new(#trigger, #negative_output, #positive_output, #match_any, #match_none, #kept.modifiers, #bindable) }
+                // The TOML `kept_modifiers` lists the matched modifiers to keep
+                // reported; `Fork` stores the inverse (the suppressed set)
+                quote! {{
+                    let match_any = #match_any;
+                    ::rmk::types::fork::Fork::new(#trigger, #negative_output, #positive_output, match_any, #match_none, match_any.modifiers & !(#kept.modifiers), #bindable)
+                }}
             });
 
             quote! {

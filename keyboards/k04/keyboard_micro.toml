@@ -21,6 +21,8 @@ peripheral_battery.pubs = 2
 peripheral_battery.subs = 4
 # One settings update publishes base, BT profile, and encoder packets together.
 peripheral_settings.channel_size = 3
+# ModuleSettingsBroadcast answers the re-sync request raised on peripheral link-up.
+peripheral_settings_refresh.subs = 1
 layer_change.channel_size = 4
 layer_change.subs = 6
 modifier.channel_size = 8
@@ -31,6 +33,7 @@ sleep_state.subs = 4
 rows = 8
 cols = 6
 layers = 16
+no_action_layer_start = 5
 # matrix_map: maps physical (row,col) positions to logical matrix positions
 # Left half rows 0-3, Right half rows 4-7.
 # K04 Micro follows Phenom Micro with the keys under X/C and comma/dot removed.
@@ -59,7 +62,7 @@ name = "Nav"
 keys = """
 Kc1            Kc2             Kc3               Kc4           Kc5          Kc6      Kc7          Kc8             Kc9         Kc0
 MT(Home,LGui)  MT(Insert,LAlt)  MT(Delete,LShift) MT(End,LCtrl) Enter        Escape   MT(Left,RCtrl) MT(Down,RShift) MT(Up,RAlt) MT(Right,RGui)
-PageUp         PageDown        _                 _             PrintScreen  _        _            _               _           _        CapsLock CapsWordToggle
+PageDown       PageUp          _                 _             PrintScreen  _        _            _               _           _        CapsLock CapsWordToggle
                   _            _            _            _        MO(3) _
 """
 encoders = [["AudioVolUp","AudioVolDown"],["AudioVolUp","AudioVolDown"]]
@@ -80,7 +83,7 @@ name = "Adjust"
 # Reference layout: function keys on the left, BT/media controls on the right.
 keys = """
 Bootloader  F1             F2              F3              F4   User19  User20                User21              User22            User23
-LGui        MT(F5,LAlt)    MT(F6,LShift)   MT(F7,LCtrl)    F8   User37  MT(AudioVolDown,RCtrl) MT(AudioMute,RShift) MT(AudioVolUp,RAlt) MT(User26,RGui)
+LGui        F5             F6              F7              F8   User37  AudioVolDown           AudioMute             AudioVolUp          User26
 _           F9             F10             F11             F12  _       _                     User38              MediaPrevTrack    MediaPlayPause  MediaNextTrack User39
                   _   _    _    _      _      _
 """
@@ -123,7 +126,7 @@ col_pins = ["P1_06", "P1_04", "P1_02", "P1_00", "P0_22", "P0_20"]
 pin_a = "P0_10"
 pin_b = "P0_09"
 phase = "resolution"
-resolution = 2
+resolution = 4
 internal_pullup = true
 
 [[split.peripheral]]
@@ -146,7 +149,7 @@ col_pins = ["P1_06", "P1_04", "P1_02", "P1_00", "P0_22", "P0_20"]
 pin_a = "P0_10"
 pin_b = "P0_09"
 phase = "resolution"
-resolution = 2
+resolution = 4
 internal_pullup = true
 
 [rmk]

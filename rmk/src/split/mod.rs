@@ -24,6 +24,17 @@ pub mod serial;
 /// Maximum size of a split message
 pub const SPLIT_MESSAGE_MAX_SIZE: usize = SplitMessage::POSTCARD_MAX_SIZE + 4;
 
+/// Serialize one split message into the caller-owned transport buffer and
+/// return only the encoded prefix. BLE notifications and writes must not send
+/// the unused zero-filled tail: high-rate pointing reports otherwise consume
+/// the airtime of the largest possible split message on every sample.
+pub(crate) fn encode_split_message<'a>(
+    message: &SplitMessage,
+    buffer: &'a mut [u8; SPLIT_MESSAGE_MAX_SIZE],
+) -> Result<&'a [u8], postcard::Error> {
+    postcard::to_slice(message, buffer).map(|encoded| &*encoded)
+}
+
 /// Message used from central & peripheral communication
 #[repr(u8)]
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, MaxSize)]
@@ -151,4 +162,24 @@ impl<'de> Deserialize<'de> for FirmwareChunkData {
 #[cfg(feature = "dfu_split")]
 impl MaxSize for FirmwareChunkData {
     const POSTCARD_MAX_SIZE: usize = 258;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_encoder_returns_only_the_serialized_prefix() {
+        let message = SplitMessage::Key(KeyboardEvent::key(2, 3, true));
+        let mut buffer = [0_u8; SPLIT_MESSAGE_MAX_SIZE];
+        let capacity = buffer.len();
+
+        let encoded = encode_split_message(&message, &mut buffer).unwrap();
+
+        assert!(encoded.len() < capacity);
+        match postcard::from_bytes::<SplitMessage>(encoded).unwrap() {
+            SplitMessage::Key(event) => assert_eq!(event, KeyboardEvent::key(2, 3, true)),
+            _ => panic!("decoded the wrong split-message variant"),
+        }
+    }
 }

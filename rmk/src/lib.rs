@@ -90,6 +90,8 @@ pub mod split;
 pub mod state;
 #[cfg(feature = "storage")]
 pub mod storage;
+#[cfg(feature = "universal_symbols")]
+pub mod universal_symbols;
 #[cfg(not(feature = "_no_usb"))]
 pub mod usb;
 #[cfg(feature = "watchdog")]

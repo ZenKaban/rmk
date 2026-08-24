@@ -3,6 +3,10 @@ name = "settings-reset"
 version = "0.2.0"
 edition = "2021"
 
+[features]
+default = []
+qube = []
+
 [dependencies]
 cortex-m = "0.7"
 cortex-m-rt = "0.7"

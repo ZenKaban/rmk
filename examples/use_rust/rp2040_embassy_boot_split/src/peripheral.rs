@@ -90,6 +90,7 @@ async fn main(_spawner: Spawner) {
         start_addr: 0,
         clear_storage: false,
         clear_layout: false,
+        no_action_layer_start: None,
     };
     let mut storage = new_storage_for_split_peripheral(flash, storage_config).await;
 

@@ -21,6 +21,8 @@ peripheral_battery.pubs = 2
 peripheral_battery.subs = 4
 # One settings update publishes base, BT profile, and encoder packets together.
 peripheral_settings.channel_size = 3
+# ModuleSettingsBroadcast answers the re-sync request raised on peripheral link-up.
+peripheral_settings_refresh.subs = 1
 layer_change.channel_size = 4
 layer_change.subs = 6
 modifier.channel_size = 8
@@ -31,6 +33,7 @@ sleep_state.subs = 4
 rows = 8
 cols = 6
 layers = 16
+no_action_layer_start = 5
 # matrix_map: maps physical (row,col) positions to logical matrix positions
 # Left half rows 0-3, Right half rows 4-7. K04 Mini omits K04's top number row.
 matrix_map = """
@@ -59,7 +62,7 @@ keys = """
 _      Kc1      Kc2     Kc3     Kc4     Kc5          Kc6  Kc7  Kc8  Kc9  Kc0    _
 _      Home     Insert  Delete  End     Enter        _    Left Down Up   Right  _
 _      _        _       _       _       PrintScreen  _    _    _    _    _      _      _  _
-PageUp PageDown _       _       _       _            MO(3)    _     CapsLock CapsWordToggle
+PageDown PageUp _       _       _       _            MO(3)    _     CapsLock CapsWordToggle
 """
 encoders = [["AudioVolUp","AudioVolDown"],["AudioVolUp","AudioVolDown"]]
 
@@ -122,7 +125,7 @@ col_pins = ["P1_06", "P1_04", "P1_02", "P1_00", "P0_22", "P0_20"]
 pin_a = "P0_10"
 pin_b = "P0_09"
 phase = "resolution"
-resolution = 2
+resolution = 4
 internal_pullup = true
 
 [[split.peripheral]]
@@ -145,7 +148,7 @@ col_pins = ["P1_06", "P1_04", "P1_02", "P1_00", "P0_22", "P0_20"]
 pin_a = "P0_10"
 pin_b = "P0_09"
 phase = "resolution"
-resolution = 2
+resolution = 4
 internal_pullup = true
 
 [rmk]

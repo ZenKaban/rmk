@@ -15,11 +15,46 @@ use crate::hid::{CompositeReportType, HidError, HidWriterTrait, Report};
 // per-connection client-specific attribute buffer size.
 pub(crate) const CCCD_TABLE_SIZE: usize = trouble_host::config::CLIENT_ATT_TABLE_SIZE;
 
+// `gatt_server` expands every field regardless of a field-level `cfg`, so the
+// host and non-host layouts are defined separately. Keep the vendor service
+// last: existing HID and Device Information handles remain stable.
+#[cfg(feature = "host")]
 #[gatt_server]
 pub(crate) struct Server {
     pub(crate) battery_service: BatteryService,
     pub(crate) hid_service: HidService,
     pub(crate) device_config_service: DeviceConfigurationService,
+    pub(crate) vial_gatt_service: VialGattService,
+}
+
+#[cfg(not(feature = "host"))]
+#[gatt_server]
+pub(crate) struct Server {
+    pub(crate) battery_service: BatteryService,
+    pub(crate) hid_service: HidService,
+    pub(crate) device_config_service: DeviceConfigurationService,
+}
+
+/// BlueZ owns HID-over-GATT services and rejects application writes to them.
+/// This parallel vendor service carries the same 32-byte Vial packets without
+/// changing the standard HOGP reports used by keyboards and other Vial hosts.
+///
+/// UUIDs are UUIDv5(DNS) values derived from:
+/// - `vial-gatt.ergohaven.xyz`
+/// - `vial-gatt-input.ergohaven.xyz`
+/// - `vial-gatt-output.ergohaven.xyz`
+#[cfg(feature = "host")]
+#[gatt_service(uuid = "8cfa65ff-3b6d-55f3-8b67-49693930420d")]
+pub(crate) struct VialGattService {
+    #[characteristic(uuid = "7a115e75-ae8e-51b4-9f46-dbd15af07dc3", read, notify, permissions(encrypted))]
+    pub(crate) input: [u8; 32],
+    #[characteristic(
+        uuid = "70ca58d5-fdbf-5497-a33f-d1e8e1698678",
+        write,
+        write_without_response,
+        permissions(encrypted)
+    )]
+    pub(crate) output: [u8; 32],
 }
 
 /// The single HID service carrying all reports, distinguished by report id via
