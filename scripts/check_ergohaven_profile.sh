@@ -144,6 +144,7 @@ for file in "${profiles[@]}"; do
     expect_toml "$file" layers 16
     expect_toml "$file" no_action_layer_start 5
     expect_toml "$file" combo_max_num 32
+    expect_toml "$file" fork_max_num 32
     expect_toml "$file" morse_max_num 32
     expect_toml "$file" macro_space_size 2048
     expect_toml "$file" ble_profiles_num 5
@@ -361,7 +362,6 @@ PY
 
 for file in "${non_k04_profiles[@]}"; do
     expect_toml "$file" combo_max_length 4
-    expect_toml "$file" fork_max_num 8
     expect_toml "$file" max_patterns_per_key 8
     expect_toml "$file" protocol_max_bulk_size 8
     expect_toml "$file" protocol_macro_chunk_size 64
@@ -416,21 +416,10 @@ mapfile -t build_scripts < <(
         done
 )
 for file in "${build_scripts[@]}"; do
-    if [[ "$file" == keyboards/k04/build.rs ]]; then
-        rg -q 'const STANDALONE_FIRMWARE_VERSION: &str = "0\.1\.8";' "$file" \
-            || fail "$file: standalone firmware version must be 0.1.8"
-        rg -q 'const STANDALONE_FIRMWARE_VERSION_BCD: &str = "0x0108";' "$file" \
-            || fail "$file: standalone BCD firmware version must be 0x0108"
-        rg -q 'const QUBE_FIRMWARE_VERSION: &str = "0\.1\.7";' "$file" \
-            || fail "$file: Qube firmware version must remain 0.1.7"
-        rg -q 'const QUBE_FIRMWARE_VERSION_BCD: &str = "0x0107";' "$file" \
-            || fail "$file: Qube BCD firmware version must remain 0x0107"
-        continue
-    fi
-    rg -q 'const FIRMWARE_VERSION: &str = "0\.1\.7";' "$file" \
-        || fail "$file: firmware version must be 0.1.7"
-    rg -q 'const FIRMWARE_VERSION_BCD: &str = "0x0107";' "$file" \
-        || fail "$file: BCD firmware version must be 0x0107"
+    rg -q 'const FIRMWARE_VERSION: &str = "0\.1\.8";' "$file" \
+        || fail "$file: firmware version must be 0.1.8"
+    rg -q 'const FIRMWARE_VERSION_BCD: &str = "0x0108";' "$file" \
+        || fail "$file: BCD firmware version must be 0x0108"
 done
 
 mapfile -t vial_definitions < <(
@@ -440,20 +429,14 @@ mapfile -t vial_definitions < <(
         done
 )
 for file in "${vial_definitions[@]}"; do
-    expected_version=0.1.7
-    case "$file" in
-        keyboards/k04/vial.json|keyboards/k04/vial_mini.json|keyboards/k04/vial_micro.json)
-            expected_version=0.1.8
-            ;;
-    esac
     jq -e '.manufacturer == "Ergohaven"' "$file" >/dev/null \
         || fail "$file: manufacturer must be Ergohaven"
-    jq -e --arg expected_version "$expected_version" '
+    jq -e '
         .firmware.name == "RMK"
-        and .firmware.version == $expected_version
-        and .firmwareVersion == $expected_version
+        and .firmware.version == "0.1.8"
+        and .firmwareVersion == "0.1.8"
     ' "$file" >/dev/null \
-        || fail "$file: RMK identity and both firmware versions must equal $expected_version"
+        || fail "$file: RMK identity and both firmware versions must equal 0.1.8"
 done
 
 python3 - <<'PY' || fail "all production profiles must advertise their release package identity"
@@ -573,11 +556,50 @@ for file in keyboards/k04/src/layer_names.rs; do
     fi
     rg -Fq 'const IDX_RESERVED_HOST_DISCONNECT_TIMEOUT: usize = 37;' "$file" \
         || fail "$file: reserved host-timeout storage byte moved"
-    rg -Fq 'fn host_disconnect_timeout_seconds() -> u64 {' "$file" \
-        || fail "$file: fixed K:04 host disconnect policy is missing"
-    rg -Fq '    30 * 60' "$file" \
-        || fail "$file: K:04 host disconnect policy is not fixed at 30 minutes"
 done
+
+host_power_module=keyboards/common/ble_host_power.rs
+rg -Fq 'BleHostPowerConfig::new(' "$host_power_module" \
+    || fail "$host_power_module: shared host BLE power policy is missing"
+rg -Fq 'SPLIT_CENTRAL_SLEEP_TIMEOUT_SECONDS' "$host_power_module" \
+    || fail "$host_power_module: host idle deadline must follow the standalone 120-second sleep contract"
+rg -Fq 'const HOST_DISCONNECT_TIMEOUT_SECONDS: u64 = 30 * 60;' "$host_power_module" \
+    || fail "$host_power_module: host disconnect policy must remain fixed at 30 minutes"
+
+standalone_central_roots=(
+    keyboards/imperial44/src/central.rs
+    keyboards/k03/src/central.rs
+    keyboards/k04/src/central.rs
+    keyboards/op36/src/central.rs
+    keyboards/velvet/src/central.rs
+)
+for file in "${standalone_central_roots[@]}"; do
+    rg -Fq '#[path = "../../common/ble_host_power.rs"]' "$file" \
+        || fail "$file: shared standalone host BLE power module is missing"
+done
+
+standalone_build_scripts=(
+    keyboards/imperial44/build.rs
+    keyboards/k03/build.rs
+    keyboards/k04/build.rs
+    keyboards/op36/build.rs
+    keyboards/velvet/build.rs
+)
+for file in "${standalone_build_scripts[@]}"; do
+    rg -Fq 'RMK_BLE_HOST_POWER_CONFIG_FN=crate::ble_host_power::ble_host_power_config' "$file" \
+        || fail "$file: standalone host BLE power callback is missing"
+done
+rg -Uq 'if is_standalone\(product_id\) \{\n[[:space:]]+println!\("cargo:rustc-env=RMK_BLE_HOST_POWER_CONFIG_FN=crate::ble_host_power::ble_host_power_config"\);\n[[:space:]]+\}' keyboards/k04/build.rs \
+    || fail "keyboards/k04/build.rs: K:04 host BLE power callback must remain Standalone-only"
+if rg -Fq 'RMK_BLE_HOST_POWER_CONFIG_FN' keyboards/classic_qube/build.rs; then
+    fail "keyboards/classic_qube/build.rs: USB Qube must not enable the host BLE power callback"
+fi
+if rg -Fq 'ble_host_power_config' keyboards/k04/src/layer_names.rs; then
+    fail "keyboards/k04/src/layer_names.rs: host BLE power policy must stay in the shared owner"
+fi
+if rg -Fq '../../common/ble_host_power.rs' keyboards/k04/src/qube.rs; then
+    fail "keyboards/k04/src/qube.rs: USB Qube must not include the host BLE power module"
+fi
 
 k04_vial_definitions=(
     keyboards/k04/vial.json
